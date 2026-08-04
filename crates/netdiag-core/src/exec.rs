@@ -39,9 +39,10 @@ pub async fn run(program: &str, args: &[&str], timeout: Duration) -> ExecResult 
     command.stdin(std::process::Stdio::null());
 
     // Keep child console windows from flashing on Windows during a scan.
+    // `tokio::process::Command` provides `creation_flags` directly, so importing
+    // std's `CommandExt` here would be an unused import.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
@@ -88,7 +89,6 @@ pub async fn run_windowed(program: &str, args: &[&str], window: Duration) -> Exe
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }

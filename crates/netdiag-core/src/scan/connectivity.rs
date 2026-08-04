@@ -75,9 +75,11 @@ fn default_loss(sent: u32, received: u32) -> f64 {
     }
 }
 
+/// Reads the count preceding a marker. Delegates to the sweep's helper because
+/// the platform wording differs — Linux "1 received" vs macOS "1 packets
+/// received" — and taking the immediately preceding word breaks on macOS.
 fn extract_before(text: &str, marker: &str) -> Option<u32> {
-    let index = text.find(marker)?;
-    text[..index].split_whitespace().last()?.parse().ok()
+    crate::scan::sweep::count_before(text, marker)
 }
 
 fn extract_after(text: &str, marker: &str) -> Option<u32> {
@@ -293,6 +295,24 @@ mod tests {
         assert_eq!(stats.max_ms, Some(3.001));
         assert_eq!(stats.jitter_ms, Some(0.962));
         assert_eq!(stats.samples, vec![1.75, 2.10]);
+    }
+
+    #[test]
+    fn parses_macos_ping_statistics() {
+        // "N packets received" and "round-trip min/avg/max/stddev" both differ
+        // from the Linux wording this parser was first written against.
+        let output = "PING 10.0.3.1 (10.0.3.1): 56 data bytes\n64 bytes from 10.0.3.1: icmp_seq=0 ttl=64 time=1.751 ms\n64 bytes from 10.0.3.1: icmp_seq=1 ttl=64 time=2.104 ms\n\n--- 10.0.3.1 ping statistics ---\n10 packets transmitted, 9 packets received, 10.0% packet loss\nround-trip min/avg/max/stddev = 1.234/2.208/3.001/0.962 ms\n";
+        let stats = parse_latency("10.0.3.1", "Gateway", output, 10);
+
+        assert_eq!(stats.sent, 10);
+        assert_eq!(
+            stats.received, 9,
+            "macOS 'N packets received' must be parsed"
+        );
+        assert_eq!(stats.loss_percent, 10.0);
+        assert_eq!(stats.min_ms, Some(1.234));
+        assert_eq!(stats.avg_ms, Some(2.208));
+        assert_eq!(stats.samples, vec![1.751, 2.104]);
     }
 
     #[test]

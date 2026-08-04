@@ -87,14 +87,10 @@ pub(crate) fn ping_succeeded(exit_ok: bool, output: &str) -> bool {
         return false;
     }
 
-    // Unix prints "1 received"; Windows prints "Received = 1".
-    if let Some(index) = lower.find(" received") {
-        let prefix = &lower[..index];
-        if let Some(number) = prefix.split_whitespace().last() {
-            if let Ok(count) = number.parse::<u32>() {
-                return count > 0;
-            }
-        }
+    // Linux prints "1 received", macOS prints "1 packets received", Windows
+    // prints "Received = 1".
+    if let Some(count) = count_before(&lower, " received") {
+        return count > 0;
     }
     if let Some(index) = lower.find("received = ") {
         let rest = &lower[index + 11..];
@@ -105,6 +101,33 @@ pub(crate) fn ping_succeeded(exit_ok: bool, output: &str) -> bool {
     }
 
     exit_ok && (lower.contains("ttl=") || lower.contains("time="))
+}
+
+/// Reads the count preceding a marker, stepping over plain filler words.
+///
+/// The wording differs per platform: Linux says "1 received" but macOS says
+/// "1 **packets** received". Taking the immediately preceding word works on
+/// Linux and silently yields "packets" on macOS, which parses as no reply — so
+/// every host would look dead there.
+///
+/// The scan is deliberately bounded: it steps over purely alphabetic words and
+/// stops at anything else. Scanning back unconditionally would wander into
+/// unrelated numbers — on Windows the text before " received" ends in
+/// "Sent = 10," and continues into per-reply lines containing "bytes=32".
+pub(crate) fn count_before(text: &str, marker: &str) -> Option<u32> {
+    let index = text.find(marker)?;
+
+    for token in text[..index].split_whitespace().rev() {
+        if let Ok(count) = token.parse::<u32>() {
+            return Some(count);
+        }
+        if !token.chars().all(|c| c.is_ascii_alphabetic()) {
+            // Punctuation or a key=value pair: we have left the phrase.
+            return None;
+        }
+    }
+
+    None
 }
 
 async fn ping_host(ip: Ipv4Addr) -> (Ipv4Addr, bool, Option<f64>) {
@@ -191,6 +214,44 @@ mod tests {
         let output = "PING 10.0.3.1 (10.0.3.1) 56(84) bytes of data.\n\n--- 10.0.3.1 ping statistics ---\n1 packets transmitted, 1 received, 0% packet loss, time 0ms\nrtt min/avg/max/mdev = 1.755/1.755/1.755/0.000 ms\n";
         assert!(ping_succeeded(true, output));
         assert_eq!(parse_ping_rtt(output), Some(1.755));
+    }
+
+    #[test]
+    fn parses_macos_ping_summary() {
+        // macOS says "1 packets received" where Linux says "1 received". Reading
+        // the word immediately before " received" yields "packets" here, which
+        // parses as no reply — so every host would look dead on macOS.
+        let output = "PING 127.0.0.1 (127.0.0.1): 56 data bytes\n\n--- 127.0.0.1 ping statistics ---\n1 packets transmitted, 1 packets received, 0.0% packet loss\nround-trip min/avg/max/stddev = 0.045/0.045/0.045/0.000 ms\n";
+        assert!(
+            ping_succeeded(true, output),
+            "macOS's 'N packets received' wording must be recognised"
+        );
+        assert_eq!(parse_ping_rtt(output), Some(0.045));
+    }
+
+    #[test]
+    fn macos_total_loss_is_not_alive() {
+        let output = "--- 10.0.3.99 ping statistics ---\n1 packets transmitted, 0 packets received, 100.0% packet loss\n";
+        assert!(!ping_succeeded(false, output));
+    }
+
+    #[test]
+    fn count_before_skips_filler_words_but_stops_at_punctuation() {
+        assert_eq!(count_before("1 received", " received"), Some(1));
+        assert_eq!(count_before("3 packets received", " received"), Some(3));
+        assert_eq!(count_before("0 packets received", " received"), Some(0));
+        assert_eq!(count_before("no numbers here", " received"), None);
+
+        // Windows: the preceding text ends in "Sent = 10," and earlier lines
+        // contain "bytes=32". Neither may be mistaken for the received count.
+        assert_eq!(
+            count_before(
+                "reply from 1.2.3.4: bytes=32 ttl=64\npackets: sent = 10, received = 9",
+                " received"
+            ),
+            None,
+            "must not wander past punctuation into unrelated numbers"
+        );
     }
 
     #[test]
