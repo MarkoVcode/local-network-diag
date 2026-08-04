@@ -60,6 +60,39 @@ Releases are **not code-signed**, so on first launch:
 
 ---
 
+## Networks
+
+Scans are grouped by **network**, and each network keeps its own history, diff
+baseline and controller settings. Without this, scanning at two sites writes into
+one history and the diff becomes nonsense — every device at the first site reads
+as "disappeared" and every device at the second as "new".
+
+**The subnet cannot identify a network.** Two different buildings routinely both
+use `192.168.0.0/24`. Networks are told apart primarily by the **gateway's MAC
+address**: a specific piece of hardware, observable without configuration, and
+unchanged when the router's IP or SSID changes. SSID, subnet and resolvers act as
+weaker corroborating signals when no gateway address can be read.
+
+On launch the app fingerprints the network you are on and:
+
+| Situation | What happens |
+| --- | --- |
+| Matches the selected network | Nothing — carry on |
+| Matches a different saved one | Offers to switch |
+| Nothing matches | Offers to create one, pre-named from the SSID |
+| Only the subnet matches, ambiguously | **Asks** — it will not guess, because guessing is how two histories get merged |
+
+Switch from the picker at the top of the sidebar, or manage them under
+**Networks**. Existing installations migrate automatically: previous scans become
+the first network, fingerprinted from the newest snapshot rather than from
+wherever you happen to be when you upgrade.
+
+A network showing **Weak fingerprint** has only its subnet to go on — usually
+because the gateway's address had not been resolved when it was created. Select
+it while connected and use *Re-detect* to pick that up.
+
+---
+
 ## UniFi controller (optional)
 
 Connecting a UniFi controller adds what a scan fundamentally cannot observe from

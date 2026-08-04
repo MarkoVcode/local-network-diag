@@ -263,6 +263,49 @@ export interface Reconciliation {
   summary: string;
 }
 
+/* ------------------------------------------------------------------ networks */
+
+/** Observable facts that identify a physical network. */
+export interface NetworkFingerprint {
+  /** The gateway's MAC — the strongest signal, and what separates two sites
+   *  that happen to share a subnet. */
+  gatewayMac?: string;
+  gatewayIp?: string;
+  subnets: string[];
+  ssid?: string;
+  dnsServers: string[];
+}
+
+export type MatchStrength = "none" | "weak" | "strong" | "definitive";
+
+export interface NetworkProfile {
+  id: string;
+  name: string;
+  fingerprint: NetworkFingerprint;
+  createdAt: string;
+  lastSeenAt?: string;
+  scanCount: number;
+}
+
+export interface NetworkCandidate {
+  id: string;
+  name: string;
+  strength: MatchStrength;
+}
+
+/** What the app should do about the network it is currently attached to. */
+export type Detection =
+  | { kind: "current"; id: string; strength: MatchStrength }
+  | { kind: "switch"; id: string; name: string; strength: MatchStrength }
+  | { kind: "ambiguous"; candidates: NetworkCandidate[] }
+  | { kind: "unknown"; suggestedName: string }
+  | { kind: "noNetwork" };
+
+export interface NetworkList {
+  active?: string;
+  networks: NetworkProfile[];
+}
+
 /* -------------------------------------------------------------------- update */
 
 export interface UpdateInfo {

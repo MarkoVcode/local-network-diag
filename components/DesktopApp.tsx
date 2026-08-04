@@ -13,6 +13,8 @@ import { CapabilityBanner, SetupPanel } from "./SetupPanel";
 import { UnifiSettings } from "./UnifiSettings";
 import { ReconciliationPanel } from "./ReconciliationPanel";
 import { UpdateGate } from "./UpdateDialog";
+import { NetworkPrompt, NetworkSwitcher } from "./NetworkSwitcher";
+import { NetworksPanel } from "./NetworksPanel";
 import { SignalMeter } from "./charts";
 import {
   Button,
@@ -29,6 +31,8 @@ import {
 import * as api from "@/lib/api";
 import {
   isNewDevice,
+  type Detection,
+  type NetworkProfile,
   type AutoRepeatState,
   type DoctorReport,
   type PhaseState,
@@ -42,6 +46,7 @@ type Section =
   | "connectivity"
   | "wifi"
   | "controller"
+  | "networks"
   | "host"
   | "history"
   | "setup";
@@ -52,7 +57,8 @@ const NAV: { id: Section; label: string; icon: string }[] = [
   { id: "connectivity", label: "Connectivity", icon: "↭" },
   { id: "wifi", label: "Wi-Fi", icon: "≋" },
   { id: "controller", label: "Controller", icon: "⊞" },
-  { id: "host", label: "Host & network", icon: "⌂" },
+  { id: "host", label: "Host & interfaces", icon: "⌂" },
+  { id: "networks", label: "Networks", icon: "◈" },
   { id: "history", label: "History", icon: "⟲" },
   { id: "setup", label: "Setup & Status", icon: "⚙" },
 ];
@@ -74,6 +80,9 @@ export function DesktopApp() {
   const [extraRange, setExtraRange] = useState("");
   const [dataDir, setDataDir] = useState<string>();
   const [appVersion, setAppVersion] = useState<string>();
+  const [networks, setNetworks] = useState<NetworkProfile[]>([]);
+  const [activeNetwork, setActiveNetwork] = useState<string>();
+  const [detection, setDetection] = useState<Detection | null>(null);
 
   const mounted = useRef(true);
 
@@ -85,6 +94,39 @@ export function DesktopApp() {
       // A missing snapshot is not an error worth interrupting the user for.
     }
   }, []);
+
+  const refreshNetworks = useCallback(async () => {
+    try {
+      const list = await api.listNetworks();
+      if (!mounted.current) return;
+      setNetworks(list.networks);
+      setActiveNetwork(list.active);
+    } catch {
+      // Not fatal: the app still works against whichever network is selected.
+    }
+  }, []);
+
+  /**
+   * Switching swaps the whole history, so everything derived from it has to be
+   * re-read. Clearing the snapshot first avoids briefly showing one network's
+   * devices under another network's name.
+   */
+  const changeNetwork = useCallback(
+    async (id: string) => {
+      try {
+        await api.switchNetwork(id);
+        setSnapshot(null);
+        setActiveNetwork(id);
+        await refreshNetworks();
+        const status = await api.getStatus();
+        if (status.lastSnapshotId) await loadSnapshot(status.lastSnapshotId);
+        setRefreshToken((token) => token + 1);
+      } catch (err) {
+        setError(String(err));
+      }
+    },
+    [loadSnapshot, refreshNetworks],
+  );
 
   const refreshDoctor = useCallback(async (force: boolean) => {
     setDoctorLoading(true);
@@ -123,12 +165,25 @@ export function DesktopApp() {
       if (!mounted.current) return;
       setDataDir(dir);
       setAppVersion(version);
+
+      await refreshNetworks();
+
+      // Ask which network this is only after the rest has loaded, so the prompt
+      // does not race the first render.
+      try {
+        const result = await api.detectNetwork();
+        if (mounted.current && result.kind !== "current" && result.kind !== "noNetwork") {
+          setDetection(result);
+        }
+      } catch {
+        // Detection is best-effort; a failure must not block the app.
+      }
     })();
 
     return () => {
       mounted.current = false;
     };
-  }, [loadSnapshot, refreshDoctor]);
+  }, [loadSnapshot, refreshDoctor, refreshNetworks]);
 
   // Live progress. Subscribed once for the app's lifetime, so a run started by
   // the auto-repeat timer streams here too.
@@ -222,6 +277,21 @@ export function DesktopApp() {
     <div className="flex h-screen overflow-hidden">
       <UpdateGate />
 
+      {detection && (
+        <NetworkPrompt
+          detection={detection}
+          onResolved={async () => {
+            setDetection(null);
+            setSnapshot(null);
+            await refreshNetworks();
+            const status = await api.getStatus();
+            if (status.lastSnapshotId) await loadSnapshot(status.lastSnapshotId);
+            setRefreshToken((token) => token + 1);
+          }}
+          onDismiss={() => setDetection(null)}
+        />
+      )}
+
       {/* ------------------------------------------------------------ sidebar */}
       <aside
         className="flex w-56 shrink-0 flex-col border-r"
@@ -236,6 +306,13 @@ export function DesktopApp() {
             </p>
           )}
         </div>
+
+        <NetworkSwitcher
+          networks={networks}
+          activeId={activeNetwork}
+          onSwitch={changeNetwork}
+          onManage={() => setSection("networks")}
+        />
 
         <nav className="flex-1 overflow-y-auto px-2">
           {NAV.map((item) => {
@@ -404,6 +481,22 @@ export function DesktopApp() {
               />
               <UnifiSettings onChanged={() => refreshDoctor(true)} />
             </div>
+          ) : section === "networks" ? (
+            /* Handled before the no-snapshot case: managing networks must work
+               even when the selected one has never been scanned. */
+            <NetworksPanel
+              networks={networks}
+              activeId={activeNetwork}
+              onChanged={async () => {
+                await refreshNetworks();
+                // Switching or deleting changes which history is current, so
+                // drop the loaded snapshot rather than showing a stale one.
+                setSnapshot(null);
+                const status = await api.getStatus();
+                if (status.lastSnapshotId) await loadSnapshot(status.lastSnapshotId);
+                setRefreshToken((token) => token + 1);
+              }}
+            />
           ) : section === "controller" && !snapshot ? (
             <ReconciliationPanel />
           ) : !snapshot ? (
