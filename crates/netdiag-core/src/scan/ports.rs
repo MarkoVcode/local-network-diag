@@ -30,14 +30,24 @@ pub async fn probe(ip: Ipv4Addr, port: u16, timeout: Duration) -> ProbeOutcome {
             drop(stream);
             ProbeOutcome::Open
         }
-        Ok(Err(err)) => {
-            if err.kind() == std::io::ErrorKind::ConnectionRefused {
-                ProbeOutcome::Refused
-            } else {
-                ProbeOutcome::Filtered
-            }
-        }
+        Ok(Err(err)) => classify_error(err.kind()),
         Err(_) => ProbeOutcome::Filtered,
+    }
+}
+
+/// Distinguishes "the host answered, but this port is shut" from silence.
+///
+/// The distinction matters because an active refusal proves the host exists even
+/// when it ignores ICMP — that is how firewalled devices get discovered. Windows
+/// does not always surface a closed port as `ConnectionRefused`, so the whole
+/// connection-error family counts as a response. Unreachability errors
+/// deliberately do not: those mean the *host* is absent, not the port.
+pub(crate) fn classify_error(kind: std::io::ErrorKind) -> ProbeOutcome {
+    use std::io::ErrorKind::*;
+
+    match kind {
+        ConnectionRefused | ConnectionReset | ConnectionAborted => ProbeOutcome::Refused,
+        _ => ProbeOutcome::Filtered,
     }
 }
 
@@ -149,11 +159,47 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
+        // Surface the raw error kind on failure: the OS that disagrees is the
+        // one whose behaviour needs documenting in `classify_error`.
+        let raw = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
+        )
+        .await;
+        let observed = match &raw {
+            Ok(Err(err)) => format!("{:?}", err.kind()),
+            Ok(Ok(_)) => "connected".to_string(),
+            Err(_) => "timeout".to_string(),
+        };
+
         let outcome = probe(Ipv4Addr::LOCALHOST, port, Duration::from_secs(2)).await;
         assert_eq!(
             outcome,
             ProbeOutcome::Refused,
-            "a refused connection proves the host is up and must not be reported as filtered"
+            "a refused connection proves the host is up and must not be reported as \
+             filtered (OS returned: {observed})"
+        );
+    }
+
+    #[test]
+    fn unreachability_is_not_treated_as_a_response() {
+        use std::io::ErrorKind;
+
+        // These mean the host is absent, so they must not mark it as up.
+        assert_eq!(classify_error(ErrorKind::TimedOut), ProbeOutcome::Filtered);
+        assert_eq!(
+            classify_error(ErrorKind::PermissionDenied),
+            ProbeOutcome::Filtered
+        );
+
+        // These are the host answering, just not on this port.
+        assert_eq!(
+            classify_error(ErrorKind::ConnectionRefused),
+            ProbeOutcome::Refused
+        );
+        assert_eq!(
+            classify_error(ErrorKind::ConnectionReset),
+            ProbeOutcome::Refused
         );
     }
 
