@@ -52,7 +52,7 @@ fn overlaps(a_channel: u32, a_band: &str, b_channel: u32, b_band: &str) -> bool 
 }
 
 pub fn assemble(interface: Option<String>, mut networks: Vec<WifiNetwork>) -> WifiInfo {
-    networks.sort_by(|a, b| b.signal.cmp(&a.signal));
+    networks.sort_by_key(|n| std::cmp::Reverse(n.signal));
 
     let current = networks.iter().find(|n| n.active).cloned();
 

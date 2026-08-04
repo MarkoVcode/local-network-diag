@@ -1,0 +1,5 @@
+# Pinning the toolchain keeps `clippy -D warnings` reproducible: a newer clippy
+# adds new lints, so an unpinned CI can fail on code that passed locally.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
