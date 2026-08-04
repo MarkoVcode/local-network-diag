@@ -652,7 +652,7 @@ async fn check_oui() -> CapabilityReport {
 /// accepted → site readable, each failing with its own remedy. That distinction
 /// matters most here, because "configured but silently failing" is the state a
 /// user is least likely to notice on their own.
-async fn check_unifi(root: Option<&std::path::Path>) -> CapabilityReport {
+async fn check_unifi(root: Option<&std::path::Path>, password: Option<&str>) -> CapabilityReport {
     let purpose = "Adds physical location (switch port / access point), operator-assigned names,                    and detection of devices the controller has never seen.";
     let affects = vec![
         "Which switch port or access point each device is on".into(),
@@ -710,26 +710,21 @@ async fn check_unifi(root: Option<&std::path::Path>) -> CapabilityReport {
         };
     }
 
-    let password = match config.load_password() {
-        Ok(password) => password,
-        Err(error) => {
-            return CapabilityReport {
-                id: "unifi".into(),
-                label: "UniFi controller".into(),
-                purpose: purpose.into(),
-                tier: Tier::Optional,
-                status: CapabilityStatus::Missing,
-                tool: None,
-                detail: format!("Could not read the stored password: {error}"),
-                affects,
-                remedy: Some(
-                    "Re-enter the controller password under Setup & Status → UniFi.".into(),
-                ),
-            }
-        }
+    let Some(password) = password else {
+        return CapabilityReport {
+            id: "unifi".into(),
+            label: "UniFi controller".into(),
+            purpose: purpose.into(),
+            tier: Tier::Optional,
+            status: CapabilityStatus::Missing,
+            tool: None,
+            detail: "No password is available for this controller.".into(),
+            affects,
+            remedy: Some("Re-enter the controller password under Setup & Status → UniFi.".into()),
+        };
     };
 
-    match crate::unifi::verify(&config, &password).await {
+    match crate::unifi::verify(&config, password).await {
         Ok(report) => CapabilityReport::ok(
             "unifi",
             "UniFi controller",
@@ -801,11 +796,15 @@ fn plural(count: usize, noun: &str) -> String {
 /// Runs every check. `force` clears the tool-availability cache first, so a tool
 /// installed while the app is running is picked up without a restart.
 pub async fn run_diagnostics(force: bool) -> DoctorReport {
-    run_diagnostics_at(force, None).await
+    run_diagnostics_at(force, None, None).await
 }
 
 /// As [`run_diagnostics`], with the storage directory the UniFi settings live in.
-pub async fn run_diagnostics_at(force: bool, root: Option<&std::path::Path>) -> DoctorReport {
+pub async fn run_diagnostics_at(
+    force: bool,
+    root: Option<&std::path::Path>,
+    unifi_password: Option<&str>,
+) -> DoctorReport {
     if force {
         clear_tool_cache().await;
     }
@@ -822,7 +821,7 @@ pub async fn run_diagnostics_at(force: bool, root: Option<&std::path::Path>) -> 
         check_wifi().await,
         check_traceroute().await,
         check_oui().await,
-        check_unifi(root).await,
+        check_unifi(root, unifi_password).await,
     ];
 
     let mut counts = DoctorCounts::default();

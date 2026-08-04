@@ -2039,6 +2039,7 @@ name = "local-network-diag"
 version = "1.0.0"
 dependencies = [
  "chrono",
+ "keyring",
  "netdiag-core",
  "serde",
  "serde_json",
@@ -2175,7 +2176,6 @@ dependencies = [
  "chrono",
  "futures",
  "if-addrs",
- "keyring",
  "rustls",
  "rustls-pki-types",
  "serde",

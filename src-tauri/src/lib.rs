@@ -5,6 +5,8 @@
 //! logic worth testing lives in the core crate, which builds without any GUI
 //! toolchain.
 
+mod credentials;
+
 use netdiag_core::{
     doctor::{self, DoctorReport},
     netutil, scan,
@@ -183,7 +185,7 @@ async fn execute_scan(
             // unreachable degrades to a warning: the scan itself is still valid.
             if let Some(config) = UnifiConfig::load(state.settings_root()).await {
                 if config.is_configured() {
-                    match config.load_password() {
+                    match credentials::load(&config) {
                         Ok(password) => match unifi::fetch(&config, &password).await {
                             Ok(unifi_snapshot) => {
                                 let reconciliation =
@@ -341,7 +343,14 @@ async fn cancel_scan(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn run_doctor(state: State<'_, Arc<AppState>>, force: bool) -> Result<DoctorReport, String> {
-    Ok(doctor::run_diagnostics_at(force, Some(state.settings_root())).await)
+    let root = state.settings_root();
+    // The engine never touches the keychain; the password is fetched here and
+    // handed in, so the doctor can still probe a live connection.
+    let password = match UnifiConfig::load(root).await {
+        Some(config) if config.is_configured() => credentials::load(&config).ok(),
+        _ => None,
+    };
+    Ok(doctor::run_diagnostics_at(force, Some(root), password.as_deref()).await)
 }
 
 /* ----------------------------------------------------------- update checking */
@@ -403,7 +412,7 @@ async fn save_unifi_config(
 ) -> Result<(), String> {
     if let Some(password) = password {
         if !password.is_empty() {
-            config.store_password(&password)?;
+            credentials::store(&config, &password)?;
         }
     }
     config.save(state.settings_root()).await
@@ -414,7 +423,7 @@ async fn clear_unifi_config(state: State<'_, Arc<AppState>>) -> Result<(), Strin
     let root = state.settings_root();
     if let Some(config) = UnifiConfig::load(root).await {
         // Ignore a keychain miss: the settings must clear regardless.
-        let _ = config.clear_password();
+        let _ = credentials::clear(&config);
     }
     UnifiConfig::delete(root).await
 }
@@ -428,7 +437,7 @@ async fn test_unifi_connection(
 ) -> Result<String, String> {
     let password = match password.filter(|p| !p.is_empty()) {
         Some(password) => password,
-        None => config.load_password()?,
+        None => credentials::load(&config)?,
     };
 
     let report = unifi::verify(&config, &password)
@@ -439,7 +448,7 @@ async fn test_unifi_connection(
     if report.newly_pinned {
         let mut stored = config.clone();
         stored.fingerprint = Some(report.fingerprint.clone());
-        stored.store_password(&password)?;
+        credentials::store(&stored, &password)?;
         stored.save(state.settings_root()).await?;
     }
 

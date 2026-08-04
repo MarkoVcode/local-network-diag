@@ -28,8 +28,5 @@ sha2 = "0.10"
 # Real CA roots — used only for public HTTPS (the update check), never for LAN.
 webpki-roots = "0.26"
 
-# OS keychain for UniFi credentials. Secrets never touch snapshots on disk.
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

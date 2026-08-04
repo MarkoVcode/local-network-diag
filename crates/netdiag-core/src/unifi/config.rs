@@ -1,14 +1,15 @@
-//! UniFi connection settings and credential storage.
+//! UniFi connection settings.
 //!
 //! Settings (host, site, username, pinned fingerprint) live in a plain JSON file
-//! alongside the snapshots. The **password never does** — it goes to the OS
-//! keychain. Snapshots are explicitly exportable from the UI, so anything
-//! written next to them must be safe to hand to someone else.
+//! alongside the snapshots. The **password never does** — the desktop layer puts
+//! it in the OS keychain, and passes it in when a connection is made.
+//!
+//! Keychain access lives in `src-tauri` rather than here on purpose: the crate
+//! that provides it pulls in libdbus on Linux, and this crate's usefulness rests
+//! on building and testing with no system dependencies.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
-const KEYRING_SERVICE: &str = "dev.localnetdiag.app";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,8 +55,9 @@ impl UnifiConfig {
         self.enabled && !self.host.trim().is_empty() && !self.username.trim().is_empty()
     }
 
-    /// Keychain entries are per host+user, so several controllers can coexist.
-    fn keyring_account(&self) -> String {
+    /// Stable identifier for this controller's credential, used as the keychain
+    /// account name by the desktop layer. Per host+user so several coexist.
+    pub fn credential_id(&self) -> String {
         format!("unifi:{}@{}", self.username, self.host)
     }
 
@@ -83,34 +85,6 @@ impl UnifiConfig {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err.to_string()),
-        }
-    }
-
-    pub fn store_password(&self, password: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())
-            .map_err(|e| format!("keychain unavailable: {e}"))?;
-        entry
-            .set_password(password)
-            .map_err(|e| format!("could not store password: {e}"))
-    }
-
-    pub fn load_password(&self) -> Result<String, String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())
-            .map_err(|e| format!("keychain unavailable: {e}"))?;
-        entry.get_password().map_err(|e| match e {
-            keyring::Error::NoEntry => {
-                "No password stored for this controller — re-enter it in Setup & Status".to_string()
-            }
-            other => format!("could not read password: {other}"),
-        })
-    }
-
-    pub fn clear_password(&self) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &self.keyring_account())
-            .map_err(|e| format!("keychain unavailable: {e}"))?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(other) => Err(format!("could not clear password: {other}")),
         }
     }
 }
@@ -244,7 +218,7 @@ mod tests {
             username: "viewer".into(),
             ..Default::default()
         };
-        assert_ne!(a.keyring_account(), b.keyring_account());
+        assert_ne!(a.credential_id(), b.credential_id());
     }
 
     #[test]
