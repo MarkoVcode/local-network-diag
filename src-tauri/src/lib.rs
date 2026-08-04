@@ -9,7 +9,9 @@ mod credentials;
 
 use netdiag_core::{
     doctor::{self, DoctorReport},
-    netutil, scan,
+    netutil,
+    networks::{self, Detection, NetworkIndex, NetworkProfile},
+    scan,
     store::{self, Store},
     types::*,
     unifi::{self, UnifiConfig},
@@ -38,10 +40,12 @@ struct AutoRepeat {
 }
 
 struct AppState {
-    store: Store,
-    /// Where settings live — the parent of the snapshot directory, so UniFi
-    /// config and update preferences sit beside the scans rather than inside them.
+    /// Root of all application data. Each network owns a subdirectory beneath it.
     settings_root: std::path::PathBuf,
+    /// Which network's history is being read and written. Everything
+    /// network-scoped resolves through this, so switching is a single change
+    /// rather than a cache to invalidate in several places.
+    active_network: Mutex<Option<String>>,
     running: Mutex<Option<ScanHandle>>,
     phases: Mutex<Vec<PhaseState>>,
     auto_repeat: Mutex<AutoRepeat>,
@@ -53,10 +57,32 @@ impl AppState {
         &self.settings_root
     }
 
-    fn new(store: Store, settings_root: std::path::PathBuf) -> Self {
+    /// Snapshot store for the active network.
+    ///
+    /// Built on demand rather than cached: a stale store after a switch would
+    /// write one network's scans into another's history, which is the exact
+    /// failure this feature exists to prevent.
+    async fn store(&self) -> Store {
+        let id = self.active_network.lock().await.clone();
+        match id {
+            Some(id) => Store::new(NetworkIndex::scans_dir(&self.settings_root, &id)),
+            // No network selected yet — a scratch location that is never shown.
+            None => Store::new(self.settings_root.join("unassigned")),
+        }
+    }
+
+    /// Directory holding the active network's settings (UniFi, etc.).
+    async fn network_root(&self) -> std::path::PathBuf {
+        match self.active_network.lock().await.clone() {
+            Some(id) => NetworkIndex::network_dir(&self.settings_root, &id),
+            None => self.settings_root.clone(),
+        }
+    }
+
+    fn new(settings_root: std::path::PathBuf) -> Self {
         Self {
-            store,
             settings_root,
+            active_network: Mutex::new(None),
             running: Mutex::new(None),
             phases: Mutex::new(Vec::new()),
             auto_repeat: Mutex::new(AutoRepeat {
@@ -157,7 +183,8 @@ async fn execute_scan(
     let phase_store = Arc::clone(&state);
     let sender = tx.clone();
 
-    let result = scan::run_scan(config, &state.store, handle, move |progress| {
+    let store = state.store().await;
+    let result = scan::run_scan(config, &store, handle, move |progress| {
         let event = match progress {
             scan::ScanProgress::Phases(phases) => {
                 // Keep the latest phase list so a window opened mid-scan can
@@ -183,7 +210,10 @@ async fn execute_scan(
             // Controller correlation runs after the scan, in this layer, because
             // the engine deliberately holds no credentials. A controller that is
             // unreachable degrades to a warning: the scan itself is still valid.
-            if let Some(config) = UnifiConfig::load(state.settings_root()).await {
+            // Controller settings are per network: a different site has a
+            // different controller, or none.
+            let network_root = state.network_root().await;
+            if let Some(config) = UnifiConfig::load(&network_root).await {
                 if config.is_configured() {
                     match credentials::load(&config) {
                         Ok(password) => match unifi::fetch(&config, &password).await {
@@ -216,7 +246,7 @@ async fn execute_scan(
             }
 
             // Re-save so the correlated data is what history and diffs see.
-            let _ = state.store.save(&snapshot).await;
+            let _ = store.save(&snapshot).await;
             Ok(snapshot)
         }
         Err(error) => Err(error),
@@ -226,6 +256,17 @@ async fn execute_scan(
         Ok(snapshot) => {
             *state.last_snapshot_id.lock().await = Some(snapshot.id.clone());
             *state.phases.lock().await = snapshot.phases.clone();
+
+            // Keep the network index's activity counters honest.
+            if let Some(id) = state.active_network.lock().await.clone() {
+                let root = state.settings_root();
+                let mut index = NetworkIndex::load(root).await;
+                if let Some(profile) = index.get_mut(&id) {
+                    profile.scan_count += 1;
+                    profile.last_seen_at = Some(snapshot.started_at.clone());
+                }
+                let _ = index.save(root).await;
+            }
             let _ = app.emit(
                 PROGRESS_EVENT,
                 &ScanEvent::Done {
@@ -296,7 +337,7 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> Result<ScanStatus, Strin
 
     let last_snapshot_id = match last {
         Some(id) => Some(id),
-        None => state.store.load_latest().await.map(|s| s.id),
+        None => state.store().await.load_latest().await.map(|s| s.id),
     };
 
     Ok(ScanStatus {
@@ -343,14 +384,151 @@ async fn cancel_scan(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn run_doctor(state: State<'_, Arc<AppState>>, force: bool) -> Result<DoctorReport, String> {
-    let root = state.settings_root();
+    let network_root = state.network_root().await;
     // The engine never touches the keychain; the password is fetched here and
     // handed in, so the doctor can still probe a live connection.
-    let password = match UnifiConfig::load(root).await {
+    let password = match UnifiConfig::load(&network_root).await {
         Some(config) if config.is_configured() => credentials::load(&config).ok(),
         _ => None,
     };
-    Ok(doctor::run_diagnostics_at(force, Some(root), password.as_deref()).await)
+    Ok(doctor::run_diagnostics_at(force, Some(&network_root), password.as_deref()).await)
+}
+
+/* -------------------------------------------------------------------- networks */
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkList {
+    active: Option<String>,
+    networks: Vec<NetworkProfile>,
+}
+
+#[tauri::command]
+async fn list_networks(state: State<'_, Arc<AppState>>) -> Result<NetworkList, String> {
+    let index = NetworkIndex::load(state.settings_root()).await;
+    Ok(NetworkList {
+        active: state.active_network.lock().await.clone().or(index.active),
+        networks: index.networks,
+    })
+}
+
+/// Fingerprints the network this machine is on and says what to do about it.
+///
+/// Called at launch and before each scan. Nothing is changed here — the decision
+/// is handed to the UI, because silently adopting a guess is how two sites end
+/// up sharing one history.
+#[tauri::command]
+async fn detect_network(state: State<'_, Arc<AppState>>) -> Result<Detection, String> {
+    let (_host, fingerprint) = networks::probe_current().await;
+    let mut index = NetworkIndex::load(state.settings_root()).await;
+    index.active = state.active_network.lock().await.clone().or(index.active);
+    Ok(index.detect(&fingerprint))
+}
+
+/// Creates a network from what is currently observable and selects it.
+#[tauri::command]
+async fn create_network(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<NetworkProfile, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("A network needs a name".into());
+    }
+
+    let (_host, fingerprint) = networks::probe_current().await;
+    let profile = NetworkProfile::new(name, fingerprint);
+
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+    let id = index.add(profile.clone());
+    index.save(root).await?;
+
+    tokio::fs::create_dir_all(NetworkIndex::scans_dir(root, &id))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    *state.active_network.lock().await = Some(id);
+    Ok(profile)
+}
+
+#[tauri::command]
+async fn switch_network(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+
+    if index.get(&id).is_none() {
+        return Err("No such network".into());
+    }
+
+    index.active = Some(id.clone());
+    index.save(root).await?;
+    *state.active_network.lock().await = Some(id);
+    Ok(())
+}
+
+/// Re-fingerprints the active network from where the machine is now.
+///
+/// Useful when a network was created before its gateway MAC could be resolved,
+/// or after the router was replaced.
+#[tauri::command]
+async fn refresh_network_fingerprint(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let Some(id) = state.active_network.lock().await.clone() else {
+        return Err("No network selected".into());
+    };
+
+    let (_host, fingerprint) = networks::probe_current().await;
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+
+    if let Some(profile) = index.get_mut(&id) {
+        profile.fingerprint = fingerprint;
+    }
+    index.save(root).await
+}
+
+#[tauri::command]
+async fn rename_network(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("A network needs a name".into());
+    }
+
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+    let Some(profile) = index.get_mut(&id) else {
+        return Err("No such network".into());
+    };
+    profile.name = name;
+    index.save(root).await
+}
+
+/// Removes a network and everything recorded for it.
+#[tauri::command]
+async fn delete_network(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+
+    // Clear the controller credential before the settings that identify it are
+    // deleted, or the keychain entry is orphaned with no way to find it again.
+    let network_root = NetworkIndex::network_dir(root, &id);
+    if let Some(config) = UnifiConfig::load(&network_root).await {
+        let _ = credentials::clear(&config);
+    }
+
+    index.networks.retain(|profile| profile.id != id);
+    if index.active.as_deref() == Some(id.as_str()) {
+        index.active = index.networks.first().map(|profile| profile.id.clone());
+    }
+    index.save(root).await?;
+
+    let _ = tokio::fs::remove_dir_all(&network_root).await;
+    *state.active_network.lock().await = index.active.clone();
+    Ok(())
 }
 
 /* ----------------------------------------------------------- update checking */
@@ -396,7 +574,7 @@ async fn set_update_checks_enabled(
 
 #[tauri::command]
 async fn get_unifi_config(state: State<'_, Arc<AppState>>) -> Result<Option<UnifiConfig>, String> {
-    Ok(UnifiConfig::load(state.settings_root()).await)
+    Ok(UnifiConfig::load(&state.network_root().await).await)
 }
 
 /// Saves settings and, when a password is supplied, stores it in the OS keychain.
@@ -415,17 +593,17 @@ async fn save_unifi_config(
             credentials::store(&config, &password)?;
         }
     }
-    config.save(state.settings_root()).await
+    config.save(&state.network_root().await).await
 }
 
 #[tauri::command]
 async fn clear_unifi_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let root = state.settings_root();
-    if let Some(config) = UnifiConfig::load(root).await {
+    let root = state.network_root().await;
+    if let Some(config) = UnifiConfig::load(&root).await {
         // Ignore a keychain miss: the settings must clear regardless.
         let _ = credentials::clear(&config);
     }
-    UnifiConfig::delete(root).await
+    UnifiConfig::delete(&root).await
 }
 
 /// Tests the connection, pinning the certificate on first success.
@@ -449,7 +627,7 @@ async fn test_unifi_connection(
         let mut stored = config.clone();
         stored.fingerprint = Some(report.fingerprint.clone());
         credentials::store(&stored, &password)?;
-        stored.save(state.settings_root()).await?;
+        stored.save(&state.network_root().await).await?;
     }
 
     Ok(format!(
@@ -469,7 +647,11 @@ async fn list_snapshots(
     state: State<'_, Arc<AppState>>,
     limit: Option<usize>,
 ) -> Result<Vec<SnapshotSummary>, String> {
-    Ok(state.store.summaries(limit.unwrap_or(50).min(200)).await)
+    Ok(state
+        .store()
+        .await
+        .summaries(limit.unwrap_or(50).min(200))
+        .await)
 }
 
 #[tauri::command]
@@ -478,9 +660,9 @@ async fn get_snapshot(
     id: String,
     diff: Option<String>,
 ) -> Result<SnapshotWithDiff, String> {
+    let store = state.store().await;
     let resolved = if id == "latest" {
-        state
-            .store
+        store
             .list_ids()
             .await
             .first()
@@ -490,8 +672,7 @@ async fn get_snapshot(
         id
     };
 
-    let snapshot = state
-        .store
+    let snapshot = store
         .load(&resolved)
         .await
         .ok_or_else(|| "Snapshot not found".to_string())?;
@@ -499,18 +680,16 @@ async fn get_snapshot(
     let diff = match diff.as_deref() {
         None => None,
         Some("previous") => {
-            let ids = state.store.list_ids().await;
+            let ids = store.list_ids().await;
             match ids.iter().position(|candidate| *candidate == resolved) {
-                Some(index) if index + 1 < ids.len() => state
-                    .store
+                Some(index) if index + 1 < ids.len() => store
                     .load(&ids[index + 1])
                     .await
                     .map(|previous| store::diff(&previous, &snapshot)),
                 _ => None,
             }
         }
-        Some(other) => state
-            .store
+        Some(other) => store
             .load(other)
             .await
             .map(|previous| store::diff(&previous, &snapshot)),
@@ -521,7 +700,7 @@ async fn get_snapshot(
 
 #[tauri::command]
 async fn delete_snapshot(state: State<'_, Arc<AppState>>, id: String) -> Result<bool, String> {
-    Ok(state.store.delete(&id).await)
+    Ok(state.store().await.delete(&id).await)
 }
 
 #[tauri::command]
@@ -580,7 +759,8 @@ async fn export_snapshot(
     path: String,
 ) -> Result<String, String> {
     let snapshot = state
-        .store
+        .store()
+        .await
         .load(&id)
         .await
         .ok_or_else(|| "Snapshot not found".to_string())?;
@@ -650,7 +830,7 @@ fn snapshot_to_csv(snapshot: &ScanSnapshot) -> String {
 
 #[tauri::command]
 async fn get_data_dir(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    Ok(state.store.root().to_string_lossy().into_owned())
+    Ok(state.store().await.root().to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -672,10 +852,24 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir());
-            let scans = root.join("scans");
 
-            let state = Arc::new(AppState::new(Store::new(scans), root));
+            let state = Arc::new(AppState::new(root.clone()));
             app.manage(Arc::clone(&state));
+
+            // Adopt any pre-networks installation and select a network before
+            // the UI asks for anything, so the first render is never against an
+            // unassigned store.
+            let startup_state = Arc::clone(&state);
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = networks::migrate_flat_layout(&root).await {
+                    eprintln!("network migration failed: {error}");
+                }
+                let index = NetworkIndex::load(&root).await;
+                if let Some(profile) = index.active_profile() {
+                    *startup_state.active_network.lock().await = Some(profile.id.clone());
+                }
+            });
+
             spawn_auto_repeat_supervisor(app.handle().clone(), state);
             Ok(())
         })
@@ -696,6 +890,13 @@ pub fn run() {
             get_update_preferences,
             skip_update_version,
             set_update_checks_enabled,
+            list_networks,
+            detect_network,
+            create_network,
+            switch_network,
+            refresh_network_fingerprint,
+            rename_network,
+            delete_network,
             get_unifi_config,
             save_unifi_config,
             clear_unifi_config,

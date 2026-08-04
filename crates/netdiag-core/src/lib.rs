@@ -21,6 +21,7 @@
 pub mod doctor;
 pub mod exec;
 pub mod netutil;
+pub mod networks;
 pub mod oui;
 pub mod platform;
 pub mod scan;

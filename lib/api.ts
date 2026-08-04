@@ -11,6 +11,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutoRepeatState,
   DoctorReport,
+  Detection,
+  NetworkList,
+  NetworkProfile,
   UnifiConfig,
   UpdateInfo,
   UpdatePreferences,
@@ -147,4 +150,39 @@ export async function testUnifiConnection(
   password?: string,
 ): Promise<string> {
   return invoke<string>("test_unifi_connection", { config, password: password ?? null });
+}
+
+/* ------------------------------------------------------------------ networks */
+
+export async function listNetworks(): Promise<NetworkList> {
+  return invoke<NetworkList>("list_networks");
+}
+
+/**
+ * Fingerprints the current network and reports what to do about it.
+ * Changes nothing — the decision is the caller's.
+ */
+export async function detectNetwork(): Promise<Detection> {
+  return invoke<Detection>("detect_network");
+}
+
+export async function createNetwork(name: string): Promise<NetworkProfile> {
+  return invoke<NetworkProfile>("create_network", { name });
+}
+
+export async function switchNetwork(id: string): Promise<void> {
+  return invoke("switch_network", { id });
+}
+
+export async function renameNetwork(id: string, name: string): Promise<void> {
+  return invoke("rename_network", { id, name });
+}
+
+export async function deleteNetwork(id: string): Promise<void> {
+  return invoke("delete_network", { id });
+}
+
+/** Re-fingerprints the active network from where the machine is now. */
+export async function refreshNetworkFingerprint(): Promise<void> {
+  return invoke("refresh_network_fingerprint");
 }
