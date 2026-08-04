@@ -171,6 +171,13 @@ export function DeviceTable({ snapshot }: { snapshot: ScanSnapshot }) {
                             {device.hostnames[0]}
                           </p>
                         )}
+                        {/* Physical location is the most actionable thing the
+                            controller adds, so it earns a place in the table. */}
+                        {(device.switchPort || device.accessPoint) && (
+                          <p className="mt-0.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+                            {device.switchPort ?? device.accessPoint}
+                          </p>
+                        )}
                       </td>
 
                       <td className="py-2.5 pr-3 align-top">

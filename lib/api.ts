@@ -11,6 +11,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutoRepeatState,
   DoctorReport,
+  UnifiConfig,
+  UpdateInfo,
+  UpdatePreferences,
   PortInfo,
   PortProfile,
   ScanDiff,
@@ -98,4 +101,50 @@ export async function onScanEvent(
   handler: (event: ScanEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<ScanEvent>("scan://progress", (message) => handler(message.payload));
+}
+
+/* -------------------------------------------------------------------- update */
+
+export async function checkForUpdate(force = false): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>("check_for_update", { force });
+}
+
+export async function getUpdatePreferences(): Promise<UpdatePreferences> {
+  return invoke<UpdatePreferences>("get_update_preferences");
+}
+
+export async function skipUpdateVersion(version: string): Promise<void> {
+  return invoke("skip_update_version", { version });
+}
+
+export async function setUpdateChecksEnabled(enabled: boolean): Promise<void> {
+  return invoke("set_update_checks_enabled", { enabled });
+}
+
+/* --------------------------------------------------------------------- UniFi */
+
+export async function getUnifiConfig(): Promise<UnifiConfig | null> {
+  return invoke<UnifiConfig | null>("get_unifi_config");
+}
+
+/**
+ * Saves settings. The password is optional so host/site can be edited without
+ * re-typing it, and it is never read back to the frontend.
+ */
+export async function saveUnifiConfig(
+  config: UnifiConfig,
+  password?: string,
+): Promise<void> {
+  return invoke("save_unifi_config", { config, password: password ?? null });
+}
+
+export async function clearUnifiConfig(): Promise<void> {
+  return invoke("clear_unifi_config");
+}
+
+export async function testUnifiConnection(
+  config: UnifiConfig,
+  password?: string,
+): Promise<string> {
+  return invoke<string>("test_unifi_connection", { config, password: password ?? null });
 }

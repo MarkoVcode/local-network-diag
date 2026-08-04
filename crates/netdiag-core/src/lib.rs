@@ -26,6 +26,8 @@ pub mod platform;
 pub mod scan;
 pub mod store;
 pub mod types;
+pub mod unifi;
+pub mod update;
 
 pub use doctor::{run_diagnostics, CapabilityReport, CapabilityStatus, DoctorReport, Tier};
 pub use scan::{run_scan, ScanHandle, ScanProgress};

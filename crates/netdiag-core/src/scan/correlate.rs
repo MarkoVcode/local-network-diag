@@ -342,6 +342,15 @@ pub fn correlate(input: CorrelateInput) -> Vec<Device> {
             off_subnet: !local_cidrs.iter().any(|cidr| cidr.contains(ip)),
             first_seen: None,
             last_seen: now.clone(),
+            // Filled in later, only when a UniFi controller is configured.
+            unifi_name: None,
+            unifi_fingerprint: None,
+            unifi_network: None,
+            switch_port: None,
+            access_point: None,
+            vlan: None,
+            rssi: None,
+            is_wired: None,
         });
         if !device.discovered_by.iter().any(|s| s == source) {
             device.discovered_by.push(source.to_string());

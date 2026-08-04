@@ -282,7 +282,13 @@ export function CapabilityBanner({
 }) {
   if (!report) return null;
 
-  const problems = report.capabilities.filter((c) => c.status !== "ok");
+  // Only surface things that are actually broken. An Optional capability sitting
+  // at "degraded" because the user simply has not configured it is not a
+  // problem — nagging about it on every launch would devalue the banner for the
+  // cases that matter. Those still appear on the Setup page.
+  const problems = report.capabilities.filter(
+    (c) => c.status === "missing" || (c.status === "degraded" && c.tier !== "optional"),
+  );
   if (problems.length === 0) return null;
 
   const critical = report.blocked;

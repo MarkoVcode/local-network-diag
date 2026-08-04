@@ -60,6 +60,75 @@ Releases are **not code-signed**, so on first launch:
 
 ---
 
+## UniFi controller (optional)
+
+Connecting a UniFi controller adds what a scan fundamentally cannot observe from
+outside a device:
+
+| | The scan knows | The controller knows |
+| --- | --- | --- |
+| Identity | vendor from MAC, open ports, mDNS/SSDP | operator-assigned alias, DHCP fingerprint |
+| Location | nothing | **which switch port or access point** |
+| History | point samples | continuous association |
+| Intent | nothing | configured VLANs and networks |
+
+The point is not the union of the two. It is the small set of findings that exist
+**only where they disagree**:
+
+- **Devices unknown to the controller** — reachable on the network, but no lease
+  was ever issued. A static IP, something behind an unmanaged switch, or a
+  spoofed address. Neither tool can produce this category alone.
+- **Devices the scan never reached** — known to the controller but silent to us.
+  This is where our *own* coverage is blind, which is the difference between
+  "there are 29 devices" and "there are 29 devices I can see".
+- **Randomized MACs identified** — phones using a private MAC have no resolvable
+  vendor, and the app correctly refuses to guess. The controller has their
+  hostname and fingerprint, so the join recovers the identity.
+- **Ports hiding other devices** — several hardware addresses learned on one
+  switch port means an unmanaged switch, VM host or bridge is behind it, and an
+  entire segment the controller cannot see into.
+
+### Connecting one
+
+1. In the UniFi console, create a **local** user with the **Viewer** role.
+   The integration only ever reads; a read-only credential cannot change your
+   network even if it leaks.
+2. In the app, open **Setup & Status → UniFi controller**, enter the address,
+   site, username and password, and press **Test connection**.
+
+The password is stored in your operating system's keychain, never in scan
+snapshots (which are exportable). The controller's TLS certificate is pinned on
+first connection: if it ever changes, the app refuses to connect **before**
+sending credentials and explains why. Only private addresses are accepted.
+
+Works with UniFi OS (UDM, UDR, Cloud Key Gen2+) and legacy software controllers;
+the flavour is detected rather than configured. An account with two-factor
+authentication cannot be used — create a separate local Viewer account without
+it.
+
+Debugging without the GUI:
+
+```bash
+UNIFI_PASSWORD=… cargo run -p netdiag-core --bin netdiag-cli -- unifi 10.0.3.12 viewer
+```
+
+---
+
+## Updates
+
+On launch the app checks GitHub for a newer release and shows a notice if one
+exists, with a button that opens the release page. It is deliberately quiet:
+
+- The check runs in Rust, not the webview, so no CSP exception is needed.
+- It **fails silently** when offline — this app is frequently launched precisely
+  because the internet is broken.
+- Results are cached for six hours, so relaunching cannot exhaust GitHub's
+  unauthenticated rate limit.
+- "Skip this version" suppresses that release only; a later one still notifies.
+  Checks can be turned off entirely.
+
+---
+
 ## Setup & Status
 
 The app includes a **Setup & Status** page that reports what it can actually do

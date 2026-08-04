@@ -21,6 +21,9 @@ hold are:
 | **Private ranges only** | Scanning is restricted to RFC1918/CGNAT/link-local space, and ranges wider than `/22` are refused. The per-host deep scan rejects public addresses. |
 | **No untrusted code in the webview** | A strict CSP is enforced, the webview has no network permissions, and all I/O happens in Rust. |
 | **Bounded parsing** | Network responses (DNS/mDNS, NetBIOS, SSDP, HTTP) are parsed with explicit length checks and jump budgets. Malformed or hostile packets must not panic or hang. |
+| **Credentials never leave the keychain** | UniFi controller passwords are stored in the OS keychain, never in snapshots (which are exportable) or logs. The client's `Debug` impl is written by hand so a session cookie cannot be printed. |
+| **Credentials only over a pinned connection** | The controller's TLS certificate is pinned on first use and verified **before** the login request is written. A changed fingerprint aborts without transmitting anything. The permissive verifier used for LAN banner-grabbing is deliberately *not* reused here. |
+| **Public HTTPS is fully verified** | The update check validates certificates against real CA roots — the opposite of the LAN inspection path, and a distinction worth preserving. |
 
 Findings that would break any of the above are in scope, as are memory-safety
 issues and anything that causes the app to send data off the local network
@@ -33,6 +36,8 @@ unexpectedly.
 - Unsigned release binaries. This is a known, documented state — see the README.
 - Findings that require an attacker to already have code execution on the
   machine running the app.
+- The update check contacting `api.github.com` on launch. It is documented, can
+  be disabled, and sends nothing but the request itself.
 
 ## A note on what the app collects
 

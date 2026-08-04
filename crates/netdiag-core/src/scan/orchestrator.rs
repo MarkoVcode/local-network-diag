@@ -491,6 +491,10 @@ where
         capabilities: capabilities.capabilities,
         // Set by `apply_history` once the previous snapshot is known.
         baseline: false,
+        // Populated by the caller when a UniFi controller is configured; the
+        // engine itself has no credentials and never fetches them.
+        unifi: None,
+        reconciliation: None,
     };
 
     let previous = store.load_latest().await;

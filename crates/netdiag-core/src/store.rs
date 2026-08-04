@@ -426,6 +426,14 @@ mod tests {
             off_subnet: false,
             first_seen: None,
             last_seen: "2026-08-04T00:00:00Z".into(),
+            unifi_name: None,
+            unifi_fingerprint: None,
+            unifi_network: None,
+            switch_port: None,
+            access_point: None,
+            vlan: None,
+            rssi: None,
+            is_wired: None,
         }
     }
 
@@ -465,6 +473,8 @@ mod tests {
             },
             capabilities: Vec::new(),
             baseline: false,
+            unifi: None,
+            reconciliation: None,
         }
     }
 

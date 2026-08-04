@@ -299,6 +299,29 @@ pub struct Device {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_seen: Option<String>,
     pub last_seen: String,
+
+    /* ---- populated by the UniFi correlation when a controller is configured ---- */
+    /// Operator-assigned alias from the controller. Outranks any inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_name: Option<String>,
+    /// The controller's own DHCP fingerprint, e.g. "Apple · iPhone · iOS".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_fingerprint: Option<String>,
+    /// Controller network/VLAN name this client belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_network: Option<String>,
+    /// Physical location for a wired client, e.g. "USW_MINI port 4".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_port: Option<String>,
+    /// Access point and SSID for a wireless client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_point: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rssi: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_wired: Option<bool>,
 }
 
 /* -------------------------------------------------------------- connectivity */
@@ -531,6 +554,12 @@ pub struct ScanSnapshot {
     /// both meaningless and alarming on first launch.
     #[serde(default)]
     pub baseline: bool,
+    /// Controller data for this run, when a UniFi controller is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi: Option<crate::unifi::model::UnifiSnapshot>,
+    /// Where the scan and the controller disagree — the point of the integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<crate::unifi::correlate::Reconciliation>,
     /// Capability report captured at scan time, so a stored snapshot explains
     /// its own gaps rather than being judged against today's environment.
     pub capabilities: Vec<crate::doctor::CapabilityReport>,

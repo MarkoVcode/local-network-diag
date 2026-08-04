@@ -85,6 +85,47 @@ export function DeviceDetail({ device }: { device: Device }) {
         </dl>
       </div>
 
+      {/* Controller data — the things a scan cannot observe from outside. */}
+      {(device.switchPort ||
+        device.accessPoint ||
+        device.unifiFingerprint ||
+        device.unifiNetwork ||
+        device.vlan !== undefined) && (
+        <div>
+          <h4 className="mb-1.5 text-xs font-semibold">From the UniFi controller</h4>
+          <dl>
+            {device.switchPort && (
+              <KeyValue
+                label="Physical port"
+                value={
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{device.switchPort}</span>
+                    <StatusBadge tone="good" label="Wired" />
+                  </span>
+                }
+              />
+            )}
+            {device.accessPoint && (
+              <KeyValue
+                label="Access point"
+                value={
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{device.accessPoint}</span>
+                    {device.rssi !== undefined && <Pill mono>RSSI {device.rssi}</Pill>}
+                  </span>
+                }
+              />
+            )}
+            {device.unifiNetwork && <KeyValue label="Network" value={device.unifiNetwork} />}
+            {device.vlan !== undefined && <KeyValue label="VLAN" value={String(device.vlan)} mono />}
+            {device.unifiFingerprint && (
+              <KeyValue label="Controller fingerprint" value={device.unifiFingerprint} />
+            )}
+            {device.unifiName && <KeyValue label="Controller alias" value={device.unifiName} />}
+          </dl>
+        </div>
+      )}
+
       {device.typeEvidence.length > 0 && (
         <div>
           <h4 className="mb-1.5 text-xs font-semibold">Why it was classified this way</h4>
