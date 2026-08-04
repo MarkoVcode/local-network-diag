@@ -181,7 +181,19 @@ async fn check_tcp() -> CapabilityReport {
             "Finds open services, and detects hosts that ignore ping but accept connections.",
             Tier::Critical,
             None,
-            "Outbound TCP connections work; the port scanner is fully functional.".into(),
+            if cfg!(windows) {
+                // Worth stating plainly: on Windows a dropped (rather than
+                // rejected) SYN makes a closed port look identical to a
+                // filtered one, so the "refused means the host is up" signal
+                // that finds ICMP-silent devices may not be available.
+                "Outbound TCP connections work; the port scanner is functional. Note that \
+                 Windows Firewall often drops rather than rejects connections to closed \
+                 ports, so a device that ignores ping and has no open ports may not be \
+                 detected."
+                    .into()
+            } else {
+                "Outbound TCP connections work; the port scanner is fully functional.".into()
+            },
         ),
         None => CapabilityReport {
             id: "tcp-scan".into(),

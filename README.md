@@ -106,6 +106,13 @@ A host that ignores ICMP is still found: the TCP phase scans every address in
 range, a refused connection proves the host is up, and the neighbour cache is
 re-read afterwards to recover MACs the first pass missed.
 
+> **On Windows**, that last signal is weaker. Windows Firewall commonly *drops*
+> connections to closed ports rather than rejecting them, which makes a closed
+> port indistinguishable from a filtered one. A device that ignores ping *and*
+> has none of the scanned ports open may therefore go undetected on Windows,
+> where it would be found on Linux or macOS. The Setup & Status page states this
+> explicitly when running on Windows.
+
 ### Portable by default
 
 mDNS, SSDP, NetBIOS, DNS and the port scanner are implemented in Rust directly on

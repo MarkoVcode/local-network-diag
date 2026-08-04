@@ -38,10 +38,16 @@ pub async fn probe(ip: Ipv4Addr, port: u16, timeout: Duration) -> ProbeOutcome {
 /// Distinguishes "the host answered, but this port is shut" from silence.
 ///
 /// The distinction matters because an active refusal proves the host exists even
-/// when it ignores ICMP — that is how firewalled devices get discovered. Windows
-/// does not always surface a closed port as `ConnectionRefused`, so the whole
-/// connection-error family counts as a response. Unreachability errors
-/// deliberately do not: those mean the *host* is absent, not the port.
+/// when it ignores ICMP — that is how firewalled devices get discovered. The
+/// whole connection-error family counts as a response; unreachability errors
+/// deliberately do not, since those mean the *host* is absent, not the port.
+///
+/// **Platform caveat.** This signal is not always available on Windows. Where
+/// Windows Firewall is configured to drop rather than reject, a closed port
+/// times out instead of returning `ConnectionRefused`, making it
+/// indistinguishable from a filtered one. A device that ignores ICMP *and* has
+/// none of the scanned ports open can therefore go undetected there. Unix hosts
+/// send RST and are unaffected.
 pub(crate) fn classify_error(kind: std::io::ErrorKind) -> ProbeOutcome {
     use std::io::ErrorKind::*;
 
@@ -173,12 +179,25 @@ mod tests {
         };
 
         let outcome = probe(Ipv4Addr::LOCALHOST, port, Duration::from_secs(2)).await;
-        assert_eq!(
-            outcome,
-            ProbeOutcome::Refused,
-            "a refused connection proves the host is up and must not be reported as \
-             filtered (OS returned: {observed})"
-        );
+
+        // On Unix a closed port always sends RST, so the refusal must be
+        // detected. Windows Firewall may drop instead, in which case a closed
+        // port is genuinely indistinguishable from a filtered one — asserting
+        // otherwise would be asserting something the OS cannot deliver.
+        if cfg!(windows) {
+            assert_ne!(
+                outcome,
+                ProbeOutcome::Open,
+                "a closed port must never be reported as open (OS returned: {observed})"
+            );
+        } else {
+            assert_eq!(
+                outcome,
+                ProbeOutcome::Refused,
+                "a refused connection proves the host is up and must not be reported as \
+                 filtered (OS returned: {observed})"
+            );
+        }
     }
 
     #[test]
