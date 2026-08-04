@@ -160,16 +160,32 @@ impl NetworkProfile {
     }
 }
 
-/// Time-ordered, filesystem-safe id. Not a UUID: this only has to be unique
-/// within one installation, and a sortable id makes the directory listing
-/// meaningful.
+/// Time-ordered, filesystem-safe id.
+///
+/// Not a UUID: this only has to be unique within one installation, and a
+/// sortable id makes the directory listing meaningful.
+///
+/// The counter is not decoration. Deriving the suffix from the clock alone
+/// collides on platforms whose sub-second resolution is coarse — two profiles
+/// created in the same millisecond got identical ids on macOS. Two networks
+/// sharing an id share a directory, which merges their histories: precisely the
+/// failure this module exists to prevent.
 fn new_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
     let now = chrono::Utc::now();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    format!("net-{}-{:05}", now.format("%Y%m%d-%H%M%S"), nanos % 100_000)
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    format!(
+        "net-{}-{:05}-{:04x}",
+        now.format("%Y%m%d-%H%M%S"),
+        nanos % 100_000,
+        sequence & 0xffff
+    )
 }
 
 /// What the app should do about the network it is currently attached to.
@@ -262,7 +278,21 @@ impl NetworkIndex {
     }
 
     /// Adds a network and selects it.
-    pub fn add(&mut self, profile: NetworkProfile) -> String {
+    ///
+    /// Uniqueness is enforced here as well as in the generator. A counter resets
+    /// when the process does, so two ids minted in the same second across a
+    /// restart could still coincide — and a duplicate id would silently merge
+    /// two networks' histories.
+    pub fn add(&mut self, mut profile: NetworkProfile) -> String {
+        if self.get(&profile.id).is_some() {
+            let mut suffix = 1u32;
+            let base = profile.id.clone();
+            while self.get(&profile.id).is_some() {
+                profile.id = format!("{base}-{suffix}");
+                suffix += 1;
+            }
+        }
+
         let id = profile.id.clone();
         self.networks.push(profile);
         self.active = Some(id.clone());
@@ -627,13 +657,42 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_unique_and_filesystem_safe() {
-        let a = new_id();
-        let b = new_id();
-        assert_ne!(a, b);
-        for id in [a, b] {
-            assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    fn ids_are_unique_even_when_minted_in_the_same_instant() {
+        // A clock-only suffix collided here on macOS, and two networks sharing
+        // an id share a directory — merging exactly the histories this module
+        // keeps apart.
+        let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_id()).collect();
+        assert_eq!(
+            ids.len(),
+            1000,
+            "id generation must not collide under speed"
+        );
+
+        for id in &ids {
+            assert!(
+                id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "ids become directory names: {id}"
+            );
         }
+    }
+
+    #[test]
+    fn adding_a_duplicate_id_disambiguates_rather_than_merging() {
+        let mut index = NetworkIndex::default();
+        let first = NetworkProfile::new("A", NetworkFingerprint::default());
+
+        // Force the collision the generator is supposed to make impossible.
+        let mut second = NetworkProfile::new("B", NetworkFingerprint::default());
+        second.id = first.id.clone();
+
+        let first_id = index.add(first);
+        let second_id = index.add(second);
+
+        assert_ne!(
+            first_id, second_id,
+            "two networks must never share a directory"
+        );
+        assert_eq!(index.networks.len(), 2);
     }
 
     #[test]
