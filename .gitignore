@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# scan snapshots
+/data
+
+# Rust
+/target
+/src-tauri/target
+/src-tauri/gen
+
+# Next static export
+/out

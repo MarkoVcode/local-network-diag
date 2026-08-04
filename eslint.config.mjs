@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Rust build output. `target/` contains generated JS assets that Tauri
+    // embeds; linting them is meaningless and they are not valid standalone JS.
+    "target/**",
+    "src-tauri/target/**",
+    "src-tauri/gen/**",
   ]),
 ]);
 

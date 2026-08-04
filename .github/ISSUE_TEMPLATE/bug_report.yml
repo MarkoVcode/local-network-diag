@@ -1,0 +1,80 @@
+name: Bug report
+description: Something the app does wrong or does not do at all
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        **Before you paste anything:** scan output contains MAC addresses,
+        hostnames and open ports for your network. Please review what you share.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the app
+        2. …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "e.g. Windows 11 23H2, macOS 15.1, Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: Shown in the status bar and on the Setup & Status page.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: Capability report
+      description: |
+        The single most useful thing for diagnosing scan issues. Either attach a
+        screenshot of the **Setup & Status** page, or paste the output of:
+
+        ```
+        cargo run -p netdiag-core --bin netdiag-cli -- doctor
+        ```
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Network shape, unusual hardware, VPNs, containers, VLANs…

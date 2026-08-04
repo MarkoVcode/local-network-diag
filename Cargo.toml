@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/netdiag-core", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/MarkoVcode/local-network-diag"
+homepage = "https://github.com/MarkoVcode/local-network-diag"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "process",
+    "sync",
+    "io-util",
+    "fs",
+] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+
+# Release profile tuned for a desktop binary: size matters more than the last
+# few percent of throughput, and the scan is I/O-bound regardless.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

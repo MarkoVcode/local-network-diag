@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The engine is a standalone crate with no GUI dependency, so it can be tested
+  # on all three platforms without installing any desktop toolchain. This is the
+  # job that actually validates the per-OS code paths (ARP parsing, ping flags,
+  # Wi-Fi survey) on the OS they target.
+  engine:
+    name: Engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: engine-${{ matrix.os }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy -p netdiag-core --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p netdiag-core
+
+      # Proves the capability doctor runs and reports honestly on each OS. It
+      # exits non-zero only when a Critical capability is unavailable, so this
+      # doubles as a smoke test of the platform layer.
+      - name: Capability doctor
+        run: cargo run -q -p netdiag-core --bin netdiag-cli -- doctor
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build static export
+        run: npm run build:web
+
+  # Confirms the desktop shell actually compiles on every target. Kept separate
+  # from `engine` because it needs the full GUI toolchain and is much slower.
+  app:
+    name: App build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: app-${{ matrix.os }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libxdo-dev \
+            patchelf
+
+      - run: npm ci
+
+      - name: Build (no bundling)
+        run: npx tauri build --no-bundle

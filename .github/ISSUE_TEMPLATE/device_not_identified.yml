@@ -1,0 +1,61 @@
+name: Device not identified correctly
+description: A device shows the wrong name, vendor, or type — or is missed entirely
+labels: ["identification"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Identification pulls from several independent sources (mDNS, SSDP,
+        NetBIOS, reverse DNS, MAC vendor, open ports). Knowing which ones
+        answered is what makes these fixable.
+
+        **Please redact anything you would rather not publish** — the MAC prefix
+        (first three octets) is enough for vendor issues; the last three are not
+        needed.
+
+  - type: dropdown
+    id: problem
+    attributes:
+      label: What is wrong
+      options:
+        - Device is missing entirely
+        - Wrong or unhelpful name
+        - Wrong vendor
+        - Wrong device type
+        - Missing metadata that other tools show
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: What the device actually is
+      placeholder: "e.g. Shelly Plus 1PM smart relay"
+    validations:
+      required: true
+
+  - type: input
+    id: mac-prefix
+    attributes:
+      label: MAC prefix (first three octets)
+      placeholder: "e.g. e0:63:da"
+
+  - type: textarea
+    id: shown
+    attributes:
+      label: What the app shows
+      description: Expand the device row and paste or screenshot the detail panel.
+      render: text
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true

@@ -1,0 +1,35 @@
+[package]
+name = "local-network-diag"
+description = "Cross-platform desktop app for local network discovery and diagnostics"
+authors = ["MarkoVcode and contributors"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+# Tauri v2 builds the app as a library so mobile targets can link it; the desktop
+# binary in main.rs is a thin wrapper around `run()`.
+name = "local_network_diag_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+netdiag-core = { path = "../crates/netdiag-core" }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+
+[features]
+# Enabled by `tauri dev`/`tauri build` when a custom protocol is in use.
+custom-protocol = ["tauri/custom-protocol"]

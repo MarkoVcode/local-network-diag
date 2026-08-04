@@ -1,20 +1,53 @@
 {
   "name": "local-network-diag",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "Cross-platform desktop app for local network discovery and diagnostics",
   "private": true,
+  "license": "MIT",
+  "author": "MarkoVcode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarkoVcode/local-network-diag.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MarkoVcode/local-network-diag/issues"
+  },
+  "homepage": "https://github.com/MarkoVcode/local-network-diag#readme",
+  "keywords": [
+    "network",
+    "scanner",
+    "diagnostics",
+    "lan",
+    "mdns",
+    "ssdp",
+    "tauri",
+    "desktop"
+  ],
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "dev:web": "next dev -H 127.0.0.1 -p 3000",
+    "build:web": "next build",
+    "tauri": "tauri",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test:core": "cargo test -p netdiag-core",
+    "doctor": "cargo run -q -p netdiag-core --bin netdiag-cli -- doctor"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
