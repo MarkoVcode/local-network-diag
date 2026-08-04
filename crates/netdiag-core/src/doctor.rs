@@ -645,6 +645,144 @@ async fn check_oui() -> CapabilityReport {
     )
 }
 
+/// UniFi controller reachability.
+///
+/// Follows the same functional-probe rule as every other check: it is not "is a
+/// URL configured" but reachable → certificate matches the pin → credentials
+/// accepted → site readable, each failing with its own remedy. That distinction
+/// matters most here, because "configured but silently failing" is the state a
+/// user is least likely to notice on their own.
+async fn check_unifi(root: Option<&std::path::Path>, password: Option<&str>) -> CapabilityReport {
+    let purpose = "Adds physical location (switch port / access point), operator-assigned names,                    and detection of devices the controller has never seen.";
+    let affects = vec![
+        "Which switch port or access point each device is on".into(),
+        "Controller aliases and device fingerprints".into(),
+        "Detecting devices unknown to the controller".into(),
+        "Identifying phones that use a randomized MAC".into(),
+    ];
+
+    let Some(root) = root else {
+        return CapabilityReport {
+            id: "unifi".into(),
+            label: "UniFi controller".into(),
+            purpose: purpose.into(),
+            tier: Tier::Optional,
+            status: CapabilityStatus::Degraded,
+            tool: None,
+            detail: "No storage directory available, so settings could not be read.".into(),
+            affects,
+            remedy: Some("This indicates a problem with the application data folder.".into()),
+        };
+    };
+
+    let Some(config) = crate::unifi::UnifiConfig::load(root).await else {
+        return CapabilityReport {
+            id: "unifi".into(),
+            label: "UniFi controller".into(),
+            purpose: purpose.into(),
+            tier: Tier::Optional,
+            status: CapabilityStatus::Degraded,
+            tool: None,
+            detail: "Not configured. The scan works without it; connecting one adds physical \
+                     location and controller names."
+                .into(),
+            affects,
+            remedy: Some(
+                "Add your controller under Setup & Status → UniFi. Create a local read-only \
+                 (\"Viewer\") account in the UniFi console first, so these credentials cannot \
+                 change anything on your network."
+                    .into(),
+            ),
+        };
+    };
+
+    if !config.is_configured() {
+        return CapabilityReport {
+            id: "unifi".into(),
+            label: "UniFi controller".into(),
+            purpose: purpose.into(),
+            tier: Tier::Optional,
+            status: CapabilityStatus::Degraded,
+            tool: None,
+            detail: "Configured but disabled.".into(),
+            affects,
+            remedy: Some("Re-enable it under Setup & Status → UniFi.".into()),
+        };
+    }
+
+    let Some(password) = password else {
+        return CapabilityReport {
+            id: "unifi".into(),
+            label: "UniFi controller".into(),
+            purpose: purpose.into(),
+            tier: Tier::Optional,
+            status: CapabilityStatus::Missing,
+            tool: None,
+            detail: "No password is available for this controller.".into(),
+            affects,
+            remedy: Some("Re-enter the controller password under Setup & Status → UniFi.".into()),
+        };
+    };
+
+    match crate::unifi::verify(&config, password).await {
+        Ok(report) => CapabilityReport::ok(
+            "unifi",
+            "UniFi controller",
+            purpose,
+            Tier::Optional,
+            None,
+            format!(
+                "Connected to {} ({:?}), {} visible. Certificate pinned.",
+                config.host,
+                report.flavour,
+                plural(report.client_count, "client")
+            ),
+        ),
+        Err(error) => {
+            let (detail, remedy) = match &error {
+                crate::unifi::UnifiError::FingerprintMismatch { .. } => (
+                    error.to_string(),
+                    "If you reinstalled the controller or regenerated its certificate, clear the \
+                     pinned fingerprint under Setup & Status → UniFi and reconnect. If you did \
+                     neither, do not reconnect until you understand why it changed."
+                        .to_string(),
+                ),
+                crate::unifi::UnifiError::Unauthorized => (
+                    error.to_string(),
+                    "Check the username and password under Setup & Status → UniFi.".to_string(),
+                ),
+                crate::unifi::UnifiError::Forbidden => (
+                    error.to_string(),
+                    format!(
+                        "The account signed in but cannot read site \"{}\". Check the site name \
+                         and that the account has at least read access to it.",
+                        config.site
+                    ),
+                ),
+                _ => (
+                    error.to_string(),
+                    format!(
+                        "Check that {} is reachable on port {} from this machine.",
+                        config.host, config.port
+                    ),
+                ),
+            };
+
+            CapabilityReport {
+                id: "unifi".into(),
+                label: "UniFi controller".into(),
+                purpose: purpose.into(),
+                tier: Tier::Optional,
+                status: CapabilityStatus::Missing,
+                tool: None,
+                detail,
+                affects,
+                remedy: Some(remedy),
+            }
+        }
+    }
+}
+
 fn plural(count: usize, noun: &str) -> String {
     if count == 1 {
         return format!("{count} {noun}");
@@ -658,6 +796,15 @@ fn plural(count: usize, noun: &str) -> String {
 /// Runs every check. `force` clears the tool-availability cache first, so a tool
 /// installed while the app is running is picked up without a restart.
 pub async fn run_diagnostics(force: bool) -> DoctorReport {
+    run_diagnostics_at(force, None, None).await
+}
+
+/// As [`run_diagnostics`], with the storage directory the UniFi settings live in.
+pub async fn run_diagnostics_at(
+    force: bool,
+    root: Option<&std::path::Path>,
+    unifi_password: Option<&str>,
+) -> DoctorReport {
     if force {
         clear_tool_cache().await;
     }
@@ -674,6 +821,7 @@ pub async fn run_diagnostics(force: bool) -> DoctorReport {
         check_wifi().await,
         check_traceroute().await,
         check_oui().await,
+        check_unifi(root, unifi_password).await,
     ];
 
     let mut counts = DoctorCounts::default();

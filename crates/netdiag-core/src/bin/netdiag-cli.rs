@@ -18,6 +18,51 @@ async fn main() {
 
     match command {
         "doctor" => run_doctor().await,
+        "unifi" => {
+            // Password comes from the environment so it never lands in shell
+            // history or a process listing argument.
+            let host = args.get(2).cloned().unwrap_or_default();
+            let username = args.get(3).cloned().unwrap_or_default();
+            let password = std::env::var("UNIFI_PASSWORD").unwrap_or_default();
+
+            if host.is_empty() || username.is_empty() {
+                eprintln!("Usage: UNIFI_PASSWORD=... netdiag-cli unifi <host> <username> [site]");
+                std::process::exit(2);
+            }
+
+            let config = netdiag_core::unifi::UnifiConfig {
+                host,
+                port: 443,
+                site: args.get(4).cloned().unwrap_or_else(|| "default".into()),
+                username,
+                // Optional pin, so the rejection path can be exercised.
+                fingerprint: std::env::var("UNIFI_FINGERPRINT").ok(),
+                enabled: true,
+            };
+
+            match netdiag_core::unifi::fetch(&config, &password).await {
+                Ok(snapshot) => print_unifi(&snapshot),
+                Err(error) => {
+                    eprintln!("UniFi: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "update" => {
+            let dir = std::env::temp_dir().join("netdiag-cli-update");
+            match netdiag_core::update::check(&dir, true).await {
+                Some(info) => {
+                    println!("current: {}", info.current_version);
+                    println!("latest:  {}", info.latest_version);
+                    println!("update available: {}", info.update_available);
+                    println!("url: {}", info.release_url);
+                    if let Some(notes) = &info.release_notes {
+                        println!("\nnotes:\n{}", notes);
+                    }
+                }
+                None => println!("No update information (offline, disabled, or no releases)."),
+            }
+        }
         "scan" => {
             let profile = match args.get(2).map(|s| s.as_str()) {
                 Some("quick") => PortProfile::Quick,
@@ -189,5 +234,64 @@ fn truncate(text: &str, max: usize) -> String {
         text.to_string()
     } else {
         text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+fn print_unifi(snapshot: &netdiag_core::unifi::UnifiSnapshot) {
+    println!(
+        "Controller {} — site {}",
+        snapshot.controller_host, snapshot.site
+    );
+
+    println!("\nManaged devices ({}):", snapshot.devices.len());
+    for device in &snapshot.devices {
+        println!(
+            "  {:<34} {:<14} {:<10} {:<10} {}",
+            truncate(&device.name, 34),
+            device.kind,
+            device.model.clone().unwrap_or_else(|| "-".into()),
+            device.version.clone().unwrap_or_else(|| "-".into()),
+            if device.upgradable {
+                "update available"
+            } else {
+                ""
+            }
+        );
+    }
+
+    println!("\nActive clients ({}):", snapshot.clients.len());
+    for client in &snapshot.clients {
+        let location = match (&client.sw_mac, client.sw_port, &client.ap_mac) {
+            (Some(sw), Some(port), _) => format!("{sw} port {port}"),
+            (_, _, Some(ap)) => format!("AP {ap}"),
+            _ => "-".into(),
+        };
+        println!(
+            "  {:<17} {:<22} {:<28} {}",
+            client.mac.clone().unwrap_or_else(|| "-".into()),
+            truncate(&client.effective_ip().unwrap_or_else(|| "-".into()), 22),
+            truncate(&client.best_name().unwrap_or_else(|| "-".into()), 28),
+            location
+        );
+    }
+
+    let crowded = snapshot.crowded_ports();
+    if !crowded.is_empty() {
+        println!("\nPorts with several devices behind them:");
+        for port in &crowded {
+            println!(
+                "  {} port {} — {} MACs (unmanaged switch, VM host or bridge)",
+                port.switch_name,
+                port.port,
+                port.macs.len()
+            );
+        }
+    }
+
+    if !snapshot.warnings.is_empty() {
+        println!("\nWarnings:");
+        for warning in &snapshot.warnings {
+            println!("  ! {warning}");
+        }
     }
 }

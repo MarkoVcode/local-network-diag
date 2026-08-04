@@ -175,6 +175,111 @@ export interface Device {
   offSubnet: boolean;
   firstSeen?: string;
   lastSeen: string;
+
+  /* Populated only when a UniFi controller is configured. */
+  /** Operator-assigned alias from the controller. Outranks any inference. */
+  unifiName?: string;
+  /** The controller's DHCP fingerprint, e.g. "Apple · iPhone · iOS". */
+  unifiFingerprint?: string;
+  unifiNetwork?: string;
+  /** Physical location for a wired client, e.g. "USW_MINI port 4". */
+  switchPort?: string;
+  /** Access point and SSID for a wireless client. */
+  accessPoint?: string;
+  vlan?: number;
+  rssi?: number;
+  isWired?: boolean;
+}
+
+/* --------------------------------------------------------------------- UniFi */
+
+export interface UnifiConfig {
+  host: string;
+  port: number;
+  site: string;
+  username: string;
+  /** SHA-256 of the controller certificate, pinned on first connection. */
+  fingerprint?: string;
+  enabled: boolean;
+}
+
+export interface UnifiDeviceSummary {
+  mac?: string;
+  ip?: string;
+  name: string;
+  kind: string;
+  model?: string;
+  version?: string;
+  adopted: boolean;
+  upgradable: boolean;
+  uptimeSeconds?: number;
+}
+
+export interface UnifiSnapshot {
+  controllerHost: string;
+  site: string;
+  devices: UnifiDeviceSummary[];
+  warnings: string[];
+}
+
+export type ShadowReason =
+  | "unknown-to-controller"
+  | "address-mismatch"
+  | "unidentified";
+
+export interface ShadowDevice {
+  ip: string;
+  displayName: string;
+  mac?: string;
+  vendor?: string;
+  openPorts: number[];
+  reason: ShadowReason;
+  explanation: string;
+}
+
+export interface MissedDevice {
+  mac: string;
+  name: string;
+  ip?: string;
+  location?: string;
+  explanation: string;
+}
+
+export interface HiddenSegment {
+  switchName: string;
+  port: number;
+  portName?: string;
+  macCount: number;
+  explanation: string;
+}
+
+/** Where the scan and the controller disagree — the point of the integration. */
+export interface Reconciliation {
+  matched: number;
+  shadow: ShadowDevice[];
+  missed: MissedDevice[];
+  hiddenSegments: HiddenSegment[];
+  identityConflicts: string[];
+  summary: string;
+}
+
+/* -------------------------------------------------------------------- update */
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  /** True only when the release is genuinely newer and not skipped. */
+  updateAvailable: boolean;
+  releaseUrl: string;
+  releaseNotes?: string;
+  publishedAt?: string;
+}
+
+export interface UpdatePreferences {
+  checkEnabled: boolean;
+  skippedVersion?: string;
+  lastChecked?: string;
+  cachedLatest?: string;
 }
 
 /* -------------------------------------------------------------- connectivity */
@@ -330,6 +435,8 @@ export interface ScanSnapshot {
   capabilities: CapabilityReport[];
   /** First recorded scan — there is no baseline, so nothing counts as "new". */
   baseline: boolean;
+  unifi?: UnifiSnapshot;
+  reconciliation?: Reconciliation;
 }
 
 /** A device is only "new" when there was a previous scan to be absent from. */

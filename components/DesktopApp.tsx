@@ -10,6 +10,9 @@ import { HistoryPanel } from "./HistoryPanel";
 import { HostPanel } from "./HostPanel";
 import { WifiPanel } from "./WifiPanel";
 import { CapabilityBanner, SetupPanel } from "./SetupPanel";
+import { UnifiSettings } from "./UnifiSettings";
+import { ReconciliationPanel } from "./ReconciliationPanel";
+import { UpdateGate } from "./UpdateDialog";
 import { SignalMeter } from "./charts";
 import {
   Button,
@@ -33,13 +36,22 @@ import {
   type ScanSnapshot,
 } from "@/lib/types";
 
-type Section = "overview" | "devices" | "connectivity" | "wifi" | "host" | "history" | "setup";
+type Section =
+  | "overview"
+  | "devices"
+  | "connectivity"
+  | "wifi"
+  | "controller"
+  | "host"
+  | "history"
+  | "setup";
 
 const NAV: { id: Section; label: string; icon: string }[] = [
   { id: "overview", label: "Overview", icon: "◉" },
   { id: "devices", label: "Devices", icon: "▤" },
   { id: "connectivity", label: "Connectivity", icon: "↭" },
   { id: "wifi", label: "Wi-Fi", icon: "≋" },
+  { id: "controller", label: "Controller", icon: "⊞" },
   { id: "host", label: "Host & network", icon: "⌂" },
   { id: "history", label: "History", icon: "⟲" },
   { id: "setup", label: "Setup & Status", icon: "⚙" },
@@ -194,8 +206,13 @@ export function DesktopApp() {
     }
   };
 
+  // Same rule as the banner: an unconfigured optional integration is not a
+  // problem to badge, but anything broken is.
   const problemCount = useMemo(
-    () => doctor?.capabilities.filter((c) => c.status !== "ok").length ?? 0,
+    () =>
+      doctor?.capabilities.filter(
+        (c) => c.status === "missing" || (c.status === "degraded" && c.tier !== "optional"),
+      ).length ?? 0,
     [doctor],
   );
 
@@ -203,6 +220,8 @@ export function DesktopApp() {
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <UpdateGate />
+
       {/* ------------------------------------------------------------ sidebar */}
       <aside
         className="flex w-56 shrink-0 flex-col border-r"
@@ -221,7 +240,12 @@ export function DesktopApp() {
         <nav className="flex-1 overflow-y-auto px-2">
           {NAV.map((item) => {
             const active = section === item.id;
-            const badge = item.id === "setup" && problemCount > 0;
+            const findings =
+              (snapshot?.reconciliation?.shadow.length ?? 0) +
+              (snapshot?.reconciliation?.identityConflicts.length ?? 0);
+            const badgeCount =
+              item.id === "setup" ? problemCount : item.id === "controller" ? findings : 0;
+            const badge = badgeCount > 0;
 
             return (
               <button
@@ -241,16 +265,19 @@ export function DesktopApp() {
                 <span className="min-w-0 flex-1 truncate">{item.label}</span>
                 {badge && (
                   <span
-                    aria-label={`${problemCount} issues`}
+                    aria-label={`${badgeCount} item(s) need attention`}
                     className="shrink-0 rounded-full px-1.5 text-[10px] font-semibold tabular"
                     style={{
-                      background: doctor?.blocked
-                        ? "var(--status-critical)"
-                        : "var(--status-warning)",
+                      background:
+                        item.id === "setup" && doctor?.blocked
+                          ? "var(--status-critical)"
+                          : item.id === "controller"
+                            ? "var(--status-critical)"
+                            : "var(--status-warning)",
                       color: "#000",
                     }}
                   >
-                    {problemCount}
+                    {badgeCount}
                   </span>
                 )}
               </button>
@@ -367,13 +394,18 @@ export function DesktopApp() {
           {running && <ProgressPanel phases={phases} />}
 
           {section === "setup" ? (
-            <SetupPanel
-              report={doctor}
-              onRecheck={() => refreshDoctor(true)}
-              loading={doctorLoading}
-              dataDir={dataDir}
-              appVersion={appVersion}
-            />
+            <div className="space-y-4">
+              <SetupPanel
+                report={doctor}
+                onRecheck={() => refreshDoctor(true)}
+                loading={doctorLoading}
+                dataDir={dataDir}
+                appVersion={appVersion}
+              />
+              <UnifiSettings onChanged={() => refreshDoctor(true)} />
+            </div>
+          ) : section === "controller" && !snapshot ? (
+            <ReconciliationPanel />
           ) : !snapshot ? (
             <Card>
               <EmptyState
@@ -404,6 +436,12 @@ export function DesktopApp() {
                 <ConnectivityPanel connectivity={snapshot.connectivity} />
               )}
               {section === "wifi" && <WifiPanel wifi={snapshot.wifi} />}
+              {section === "controller" && (
+                <ReconciliationPanel
+                  reconciliation={snapshot.reconciliation}
+                  unifi={snapshot.unifi}
+                />
+              )}
               {section === "host" && <HostPanel snapshot={snapshot} />}
               {section === "history" && (
                 <HistoryPanel

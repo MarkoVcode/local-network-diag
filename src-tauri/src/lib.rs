@@ -5,11 +5,15 @@
 //! logic worth testing lives in the core crate, which builds without any GUI
 //! toolchain.
 
+mod credentials;
+
 use netdiag_core::{
     doctor::{self, DoctorReport},
     netutil, scan,
     store::{self, Store},
     types::*,
+    unifi::{self, UnifiConfig},
+    update::{self, UpdateInfo, UpdatePreferences},
     ScanHandle,
 };
 use serde::{Deserialize, Serialize};
@@ -35,6 +39,9 @@ struct AutoRepeat {
 
 struct AppState {
     store: Store,
+    /// Where settings live — the parent of the snapshot directory, so UniFi
+    /// config and update preferences sit beside the scans rather than inside them.
+    settings_root: std::path::PathBuf,
     running: Mutex<Option<ScanHandle>>,
     phases: Mutex<Vec<PhaseState>>,
     auto_repeat: Mutex<AutoRepeat>,
@@ -42,9 +49,14 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(store: Store) -> Self {
+    fn settings_root(&self) -> &std::path::Path {
+        &self.settings_root
+    }
+
+    fn new(store: Store, settings_root: std::path::PathBuf) -> Self {
         Self {
             store,
+            settings_root,
             running: Mutex::new(None),
             phases: Mutex::new(Vec::new()),
             auto_repeat: Mutex::new(AutoRepeat {
@@ -166,6 +178,50 @@ async fn execute_scan(
 
     *state.running.lock().await = None;
 
+    let result = match result {
+        Ok(mut snapshot) => {
+            // Controller correlation runs after the scan, in this layer, because
+            // the engine deliberately holds no credentials. A controller that is
+            // unreachable degrades to a warning: the scan itself is still valid.
+            if let Some(config) = UnifiConfig::load(state.settings_root()).await {
+                if config.is_configured() {
+                    match credentials::load(&config) {
+                        Ok(password) => match unifi::fetch(&config, &password).await {
+                            Ok(unifi_snapshot) => {
+                                let reconciliation =
+                                    unifi::correlate::apply(&mut snapshot.devices, &unifi_snapshot);
+                                snapshot.warnings.extend(unifi_snapshot.warnings.clone());
+                                snapshot.unifi = Some(unifi_snapshot);
+                                snapshot.reconciliation = Some(reconciliation);
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "UniFi correlation unavailable: {}",
+                                    unifi::config::redact(&error.to_string())
+                                );
+                                let _ = app.emit(
+                                    PROGRESS_EVENT,
+                                    &ScanEvent::Warning {
+                                        message: message.clone(),
+                                    },
+                                );
+                                snapshot.warnings.push(message);
+                            }
+                        },
+                        Err(error) => snapshot
+                            .warnings
+                            .push(format!("UniFi password unavailable: {error}")),
+                    }
+                }
+            }
+
+            // Re-save so the correlated data is what history and diffs see.
+            let _ = state.store.save(&snapshot).await;
+            Ok(snapshot)
+        }
+        Err(error) => Err(error),
+    };
+
     match result {
         Ok(snapshot) => {
             *state.last_snapshot_id.lock().await = Some(snapshot.id.clone());
@@ -286,8 +342,126 @@ async fn cancel_scan(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-async fn run_doctor(force: bool) -> Result<DoctorReport, String> {
-    Ok(doctor::run_diagnostics(force).await)
+async fn run_doctor(state: State<'_, Arc<AppState>>, force: bool) -> Result<DoctorReport, String> {
+    let root = state.settings_root();
+    // The engine never touches the keychain; the password is fetched here and
+    // handed in, so the doctor can still probe a live connection.
+    let password = match UnifiConfig::load(root).await {
+        Some(config) if config.is_configured() => credentials::load(&config).ok(),
+        _ => None,
+    };
+    Ok(doctor::run_diagnostics_at(force, Some(root), password.as_deref()).await)
+}
+
+/* ----------------------------------------------------------- update checking */
+
+#[tauri::command]
+async fn check_for_update(
+    state: State<'_, Arc<AppState>>,
+    force: bool,
+) -> Result<Option<UpdateInfo>, String> {
+    Ok(update::check(state.settings_root(), force).await)
+}
+
+#[tauri::command]
+async fn get_update_preferences(
+    state: State<'_, Arc<AppState>>,
+) -> Result<UpdatePreferences, String> {
+    Ok(UpdatePreferences::load(state.settings_root()).await)
+}
+
+#[tauri::command]
+async fn skip_update_version(
+    state: State<'_, Arc<AppState>>,
+    version: String,
+) -> Result<(), String> {
+    let root = state.settings_root();
+    let mut prefs = UpdatePreferences::load(root).await;
+    prefs.skipped_version = Some(version);
+    prefs.save(root).await
+}
+
+#[tauri::command]
+async fn set_update_checks_enabled(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let root = state.settings_root();
+    let mut prefs = UpdatePreferences::load(root).await;
+    prefs.check_enabled = enabled;
+    prefs.save(root).await
+}
+
+/* -------------------------------------------------------------------- UniFi */
+
+#[tauri::command]
+async fn get_unifi_config(state: State<'_, Arc<AppState>>) -> Result<Option<UnifiConfig>, String> {
+    Ok(UnifiConfig::load(state.settings_root()).await)
+}
+
+/// Saves settings and, when a password is supplied, stores it in the OS keychain.
+///
+/// The password is a separate optional argument so the UI can update the host or
+/// site without the user re-typing it, and so it is never round-tripped back to
+/// the frontend.
+#[tauri::command]
+async fn save_unifi_config(
+    state: State<'_, Arc<AppState>>,
+    config: UnifiConfig,
+    password: Option<String>,
+) -> Result<(), String> {
+    if let Some(password) = password {
+        if !password.is_empty() {
+            credentials::store(&config, &password)?;
+        }
+    }
+    config.save(state.settings_root()).await
+}
+
+#[tauri::command]
+async fn clear_unifi_config(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let root = state.settings_root();
+    if let Some(config) = UnifiConfig::load(root).await {
+        // Ignore a keychain miss: the settings must clear regardless.
+        let _ = credentials::clear(&config);
+    }
+    UnifiConfig::delete(root).await
+}
+
+/// Tests the connection, pinning the certificate on first success.
+#[tauri::command]
+async fn test_unifi_connection(
+    state: State<'_, Arc<AppState>>,
+    config: UnifiConfig,
+    password: Option<String>,
+) -> Result<String, String> {
+    let password = match password.filter(|p| !p.is_empty()) {
+        Some(password) => password,
+        None => credentials::load(&config)?,
+    };
+
+    let report = unifi::verify(&config, &password)
+        .await
+        .map_err(|e| unifi::config::redact(&e.to_string()))?;
+
+    // Persist the fingerprint so subsequent connections are pinned.
+    if report.newly_pinned {
+        let mut stored = config.clone();
+        stored.fingerprint = Some(report.fingerprint.clone());
+        credentials::store(&stored, &password)?;
+        stored.save(state.settings_root()).await?;
+    }
+
+    Ok(format!(
+        "Connected to {} — {} client(s) visible.{}",
+        config.host,
+        report.client_count,
+        if report.newly_pinned {
+            " Certificate pinned for future connections."
+        } else {
+            ""
+        }
+    ))
 }
 
 #[tauri::command]
@@ -494,13 +668,13 @@ pub fn run() {
         .setup(|app| {
             // Snapshots live in the OS-appropriate app data directory rather than
             // next to the binary, which would be read-only once installed.
-            let dir = app
+            let root = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir())
-                .join("scans");
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let scans = root.join("scans");
 
-            let state = Arc::new(AppState::new(Store::new(dir)));
+            let state = Arc::new(AppState::new(Store::new(scans), root));
             app.manage(Arc::clone(&state));
             spawn_auto_repeat_supervisor(app.handle().clone(), state);
             Ok(())
@@ -518,6 +692,14 @@ pub fn run() {
             export_snapshot,
             get_data_dir,
             get_app_version,
+            check_for_update,
+            get_update_preferences,
+            skip_update_version,
+            set_update_checks_enabled,
+            get_unifi_config,
+            save_unifi_config,
+            clear_unifi_config,
+            test_unifi_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the application");

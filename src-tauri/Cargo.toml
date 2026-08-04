@@ -30,6 +30,11 @@ serde_json.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 
+# OS keychain for UniFi credentials. Deliberately here and not in netdiag-core:
+# it pulls in libdbus on Linux, and the engine crate's value is that it builds
+# and tests with no system dependencies at all.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
 [features]
 # Enabled by `tauri dev`/`tauri build` when a custom protocol is in use.
 custom-protocol = ["tauri/custom-protocol"]

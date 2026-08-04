@@ -248,6 +248,126 @@ pub fn extract_title(body: &str) -> Option<String> {
     }
 }
 
+/* ------------------------------------------------------- verified public HTTPS */
+
+/// TLS config that performs **real** certificate validation against the bundled
+/// CA roots.
+///
+/// This is the opposite of [`tls_config`] and the distinction is deliberate.
+/// [`tls_config`] accepts any certificate because it inspects LAN devices that
+/// legitimately present self-signed ones, and it never sends them anything. This
+/// one is for talking to a public service on the internet, where accepting any
+/// certificate would let anyone on the path impersonate it.
+fn verified_tls_config() -> Arc<ClientConfig> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
+/// GETs a public HTTPS URL with full certificate verification.
+///
+/// Used for the update check. Follows one redirect, because GitHub's API
+/// redirects `/releases/latest` to the concrete release.
+pub async fn get_text_public(
+    url: &str,
+    timeout: Duration,
+    limit: usize,
+    extra_headers: &[(&str, &str)],
+) -> Result<String, String> {
+    let mut current = url.to_string();
+
+    for _ in 0..3 {
+        let rest = current
+            .strip_prefix("https://")
+            .ok_or_else(|| "only https is supported".to_string())?;
+
+        let (authority, path) = match rest.find('/') {
+            Some(index) => (&rest[..index], &rest[index..]),
+            None => (rest, "/"),
+        };
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(443)),
+            None => (authority.to_string(), 443u16),
+        };
+
+        let host_for_sni = host.clone();
+        let request_path = path.to_string();
+        let headers = extra_headers.to_vec();
+
+        let work = async move {
+            let stream = TcpStream::connect((host_for_sni.as_str(), port))
+                .await
+                .map_err(|e| e.to_string())?;
+
+            use tokio_rustls::TlsConnector;
+            let connector = TlsConnector::from(verified_tls_config());
+            let server_name =
+                ServerName::try_from(host_for_sni.clone()).map_err(|e| e.to_string())?;
+            let mut tls = connector
+                .connect(server_name, stream)
+                .await
+                .map_err(|e| format!("TLS verification failed: {e}"))?;
+
+            // GitHub rejects requests without a User-Agent.
+            let mut request = format!(
+                "GET {request_path} HTTP/1.1\r\nHost: {host_for_sni}\r\n\
+                 User-Agent: local-network-diag\r\nConnection: close\r\n"
+            );
+            for (key, value) in headers {
+                request.push_str(&format!("{key}: {value}\r\n"));
+            }
+            request.push_str("\r\n");
+
+            tls.write_all(request.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok::<String, String>(read_bounded_generic(&mut tls, limit).await)
+        };
+
+        let raw = tokio::time::timeout(timeout, work)
+            .await
+            .map_err(|_| "timed out".to_string())??;
+
+        let response = parse_response(&raw).ok_or_else(|| "malformed response".to_string())?;
+
+        match response.status {
+            200 => return Ok(response.body),
+            301 | 302 | 307 | 308 => {
+                let Some(location) = response.headers.get("location") else {
+                    return Err("redirect without a location".into());
+                };
+                current = location.clone();
+            }
+            other => return Err(format!("HTTP {other}")),
+        }
+    }
+
+    Err("too many redirects".into())
+}
+
+async fn read_bounded_generic<S>(stream: &mut S, limit: usize) -> String
+where
+    S: AsyncReadExt + Unpin,
+{
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 8192];
+
+    while buf.len() < limit {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
