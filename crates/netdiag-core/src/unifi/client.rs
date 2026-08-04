@@ -602,10 +602,7 @@ pub(crate) fn decode_chunked(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
 
-    loop {
-        let Some((size_line, remainder)) = rest.split_once("\r\n") else {
-            break;
-        };
+    while let Some((size_line, remainder)) = rest.split_once("\r\n") {
         // A chunk header may carry extensions after a semicolon.
         let size_token = size_line.split(';').next().unwrap_or("").trim();
         let Ok(size) = usize::from_str_radix(size_token, 16) else {
