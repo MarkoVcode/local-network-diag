@@ -141,18 +141,42 @@ jobs:
       - name: Test engine
         run: cargo test -p netdiag-core
 
-      - name: Build and upload
+      # Signing is opt-in. The env vars below are only set when the certificate
+      # secret is actually populated: Tauri treats a *defined but empty*
+      # APPLE_CERTIFICATE as "sign this", then fails importing an empty
+      # certificate, so passing the secrets unconditionally breaks unsigned
+      # builds on macOS.
+      - name: Detect signing configuration
+        id: signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "${APPLE_CERTIFICATE}" ]; then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "macos=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and upload (unsigned)
+        if: steps.signing.outputs.macos == 'false'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing is optional. Populate these repository secrets to produce
-          # signed builds; left unset, the action simply skips signing and the
-          # artifacts are unsigned (see the release notes for the consequences).
-          #
-          # macOS:   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
-          #          APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
-          # Windows: TAURI_WINDOWS_CERTIFICATE_THUMBPRINT (with a cert in the runner store)
-          # Updater: TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+      # To produce signed macOS builds, add these repository secrets and this
+      # step takes over automatically:
+      #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+      #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+      # For Windows Authenticode, add TAURI_WINDOWS_CERTIFICATE_THUMBPRINT.
+      - name: Build and upload (signed)
+        if: steps.signing.outputs.macos == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
