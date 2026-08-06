@@ -23,6 +23,7 @@ const ENDPOINTS: &[(&str, &str)] = &[
     ("stat/device", "managed devices"),
     ("stat/alluser", "known clients"),
     ("stat/health", "site health"),
+    ("rest/networkconf", "configured networks"),
 ];
 
 /// Signs in, fetches everything, signs out.
@@ -62,11 +63,25 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
                     let records: Vec<model::UnifiHealthRecord> = parse_list(value);
                     snapshot.health = records.iter().map(Into::into).collect();
                 }
+                "rest/networkconf" => {
+                    let records: Vec<model::UnifiNetworkConf> = parse_list(value);
+                    snapshot.networks = records.iter().map(Into::into).collect();
+                }
                 _ => {}
             },
-            Err(error) => snapshot
-                .warnings
-                .push(format!("Could not read {label}: {error}")),
+            Err(error) => {
+                let mut message = format!("Could not read {label}: {error}");
+                // `rest/` is configuration, which some read-only roles cannot
+                // see even though they can read every `stat/` collection. Name
+                // the fix, since "forbidden" alone points nowhere.
+                if error == UnifiError::Forbidden && endpoint.starts_with("rest/") {
+                    message.push_str(
+                        " — reading configuration needs the account's Network role \
+                         to be Viewer (or higher), not a restricted read-only role.",
+                    );
+                }
+                snapshot.warnings.push(message);
+            }
         }
     }
 

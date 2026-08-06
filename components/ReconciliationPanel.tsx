@@ -93,13 +93,15 @@ export function ReconciliationPanel({
   // Absent on snapshots stored before these findings existed.
   const wirelessIssues = reconciliation.wirelessIssues ?? [];
   const degradedLinks = reconciliation.degradedLinks ?? [];
+  const unscannedNetworks = reconciliation.unscannedNetworks ?? [];
   const clean =
     shadow.length === 0 &&
     missed.length === 0 &&
     hiddenSegments.length === 0 &&
     identityConflicts.length === 0 &&
     wirelessIssues.length === 0 &&
-    degradedLinks.length === 0;
+    degradedLinks.length === 0 &&
+    unscannedNetworks.length === 0;
 
   return (
     <div className="space-y-4">
@@ -260,6 +262,52 @@ export function ReconciliationPanel({
                 <span style={{ color: "var(--text-secondary)" }}>{conflict}</span>
               </li>
             ))}
+          </ul>
+        </Card>
+      )}
+
+      {unifi && (unifi.networks ?? []).length > 0 && (
+        <Card
+          title={`Configured networks — ${unifi.networks!.length}`}
+          subtitle="Every network the controller defines, whether or not this scan could see it"
+        >
+          <ul className="space-y-2">
+            {unifi.networks!.map((net, i) => {
+              const blindSpot = unscannedNetworks.find((u) => u.name === net.name);
+              return (
+                <li
+                  key={i}
+                  className="rounded-lg border p-3"
+                  style={{
+                    borderColor: blindSpot ? "var(--status-warning)" : "var(--border)",
+                    opacity: net.enabled ? 1 : 0.55,
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">{net.name}</span>
+                    {net.subnet && <Pill mono>{net.subnet}</Pill>}
+                    {net.vlan !== undefined && <Pill mono>VLAN {net.vlan}</Pill>}
+                    {net.purpose === "guest" && <Pill>guest</Pill>}
+                    {!net.enabled && <Pill>disabled</Pill>}
+                    {blindSpot ? (
+                      <StatusBadge tone="warning" label="Never scanned" />
+                    ) : (
+                      /* WAN/VPN entries are not scannable LANs, so neither badge applies. */
+                      net.enabled &&
+                      net.subnet &&
+                      !["wan", "wan2", "vpn-client", "site-vpn", "remote-user-vpn"].includes(
+                        net.purpose ?? "",
+                      ) && <StatusBadge tone="good" label="Covered" />
+                    )}
+                  </div>
+                  {blindSpot && (
+                    <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                      {blindSpot.explanation}
+                    </p>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </Card>
       )}

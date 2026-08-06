@@ -98,6 +98,19 @@ pub struct DegradedLink {
     pub explanation: String,
 }
 
+/// A network the controller defines but no scan target covered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnscannedNetwork {
+    pub name: String,
+    pub subnet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    pub explanation: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HiddenSegment {
@@ -130,6 +143,10 @@ pub struct Reconciliation {
     /// Switch ports negotiated far below the switch's demonstrated speed.
     #[serde(default)]
     pub degraded_links: Vec<DegradedLink>,
+    /// Configured networks this scan's targets never covered — the scanner's
+    /// own blind spots, stated by name.
+    #[serde(default)]
+    pub unscanned_networks: Vec<UnscannedNetwork>,
     pub summary: String,
 }
 
@@ -139,9 +156,25 @@ pub struct Reconciliation {
 /// location/VLAN/signal become new fields. Nothing the scanner observed
 /// first-hand is overwritten, because the scan measured it and the controller
 /// only believes it.
-pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
+///
+/// `scanned_cidrs` is the list of ranges this scan actually targeted, used to
+/// name the configured networks the scan never looked at.
+pub fn apply(
+    devices: &mut [Device],
+    unifi: &UnifiSnapshot,
+    scanned_cidrs: &[String],
+) -> Reconciliation {
     let by_mac = unifi.clients_by_mac();
     let device_names = unifi.device_names();
+    let unscanned_networks = find_unscanned_networks(unifi, scanned_cidrs);
+
+    // Configured VLAN id -> network name, to name a client whose record
+    // carries only the number.
+    let vlan_names: std::collections::HashMap<u32, String> = unifi
+        .networks
+        .iter()
+        .filter_map(|net| net.vlan.map(|vlan| (vlan, net.name.clone())))
+        .collect();
 
     let mut matched = 0usize;
     let mut shadow = Vec::new();
@@ -205,7 +238,11 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         device.vlan = record.vlan;
         device.is_wired = record.is_wired;
         device.rssi = record.rssi;
-        device.unifi_network = record.network.clone();
+        device.unifi_network = record.network.clone().or_else(|| {
+            // The client record sometimes carries only the VLAN number; the
+            // configured name is what a human recognises.
+            record.vlan.and_then(|vlan| vlan_names.get(&vlan).cloned())
+        });
         device.satisfaction = record.satisfaction;
         device.channel = record.channel;
         device.wifi_generation = record.wifi_generation();
@@ -305,16 +342,40 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
                     .unwrap_or_else(|| mac.clone())
             });
 
+        let ip = record.effective_ip();
+
+        // When the device sits on a network we know the scan never covered,
+        // the generic guess upgrades to a statement.
+        let blind_spot = unscanned_networks
+            .iter()
+            .find(|net| {
+                record.network.as_deref() == Some(net.name.as_str())
+                    || ip
+                        .as_deref()
+                        .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+                        .zip(crate::netutil::parse_cidr_any(&net.subnet).ok())
+                        .map(|(ip, cidr)| cidr.contains(ip))
+                        .unwrap_or(false)
+            })
+            .map(|net| {
+                format!(
+                    "The controller shows this connected on \"{}\" ({}), a network this scan \
+                     did not cover — so not reaching it is expected, not a fault.",
+                    net.name, net.subnet
+                )
+            });
+
         missed.push(MissedDevice {
             mac: mac.clone(),
             name: record.best_name().unwrap_or_else(|| mac.clone()),
-            ip: record.effective_ip(),
+            ip,
             location,
-            explanation:
+            explanation: blind_spot.unwrap_or_else(|| {
                 "The controller shows this connected, but the scan did not reach it. Usually a \
                  sleeping device, one that ignores probes, or one on a network this machine \
                  cannot route to."
-                    .into(),
+                    .into()
+            }),
         });
     }
 
@@ -359,6 +420,7 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         &hidden_segments,
         &wireless_issues,
         &degraded_links,
+        &unscanned_networks,
     );
 
     Reconciliation {
@@ -369,8 +431,72 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         identity_conflicts,
         wireless_issues,
         degraded_links,
+        unscanned_networks,
         summary,
     }
+}
+
+/// Configured, enabled LAN networks whose subnet no scan target overlaps.
+///
+/// WAN and VPN entries in `rest/networkconf` are not LANs — nothing on them
+/// could ever be a scan target — so they are excluded rather than reported as
+/// blind spots.
+fn find_unscanned_networks(
+    unifi: &UnifiSnapshot,
+    scanned_cidrs: &[String],
+) -> Vec<UnscannedNetwork> {
+    use crate::netutil::parse_cidr_any;
+
+    let scanned: Vec<_> = scanned_cidrs
+        .iter()
+        .filter_map(|cidr| parse_cidr_any(cidr).ok())
+        .collect();
+
+    let mut out = Vec::new();
+    for network in &unifi.networks {
+        if !network.enabled {
+            continue;
+        }
+        if matches!(
+            network.purpose.as_deref(),
+            Some("wan") | Some("wan2") | Some("vpn-client") | Some("site-vpn") | Some("remote-user-vpn")
+        ) {
+            continue;
+        }
+        let Some(subnet) = &network.subnet else {
+            continue;
+        };
+        let Ok(cidr) = parse_cidr_any(subnet) else {
+            continue;
+        };
+        let covered = scanned
+            .iter()
+            .any(|target| target.first <= cidr.last && cidr.first <= target.last);
+        if covered {
+            continue;
+        }
+
+        out.push(UnscannedNetwork {
+            explanation: format!(
+                "The controller defines \"{}\"{} at {}, but no target of this scan covered that \
+                 range — devices there are invisible to it. If this machine can route there, \
+                 add {} as an extra scan range; otherwise run a scan from that network.",
+                network.name,
+                network
+                    .vlan
+                    .map(|vlan| format!(" (VLAN {vlan})"))
+                    .unwrap_or_default(),
+                subnet,
+                subnet
+            ),
+            name: network.name.clone(),
+            subnet: subnet.clone(),
+            vlan: network.vlan,
+            purpose: network.purpose.clone(),
+        });
+    }
+
+    out
 }
 
 /// Flags a wireless client the controller itself rates as struggling.
@@ -473,12 +599,14 @@ fn build_summary(
     hidden: &[HiddenSegment],
     wireless: &[WirelessHealthIssue],
     degraded: &[DegradedLink],
+    unscanned: &[UnscannedNetwork],
 ) -> String {
     if shadow.is_empty()
         && missed.is_empty()
         && hidden.is_empty()
         && wireless.is_empty()
         && degraded.is_empty()
+        && unscanned.is_empty()
     {
         return format!("All {matched} devices are accounted for by the controller.");
     }
@@ -498,6 +626,9 @@ fn build_summary(
     }
     if !degraded.is_empty() {
         parts.push(format!("{} degraded link(s)", degraded.len()));
+    }
+    if !unscanned.is_empty() {
+        parts.push(format!("{} network(s) never scanned", unscanned.len()));
     }
     parts.join(", ")
 }
@@ -594,7 +725,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
 
         assert_eq!(result.matched, 1);
         assert!(result.shadow.is_empty());
@@ -615,7 +746,7 @@ mod tests {
             "unknown",
             &[22],
         )];
-        let result = apply(&mut devices, &UnifiSnapshot::default());
+        let result = apply(&mut devices, &UnifiSnapshot::default(), &[]);
 
         assert_eq!(result.shadow.len(), 1);
         assert_eq!(result.shadow[0].reason, ShadowReason::UnknownToController);
@@ -636,7 +767,7 @@ mod tests {
         devices[0].is_self = true;
         devices[1].is_gateway = true;
 
-        let result = apply(&mut devices, &UnifiSnapshot::default());
+        let result = apply(&mut devices, &UnifiSnapshot::default(), &[]);
         assert!(result.shadow.is_empty(), "self and gateway must be exempt");
     }
 
@@ -655,7 +786,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply(&mut devices, &unifi);
+        apply(&mut devices, &unifi, &[]);
 
         assert_eq!(devices[0].display_name, "Pixel 10");
         assert!(devices[0]
@@ -672,7 +803,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
         assert_eq!(result.missed.len(), 1);
         assert_eq!(result.missed[0].name, "Sleeping Tablet");
     }
@@ -687,7 +818,7 @@ mod tests {
             clients: vec![stale],
             ..Default::default()
         };
-        let result = apply(&mut Vec::new(), &unifi);
+        let result = apply(&mut Vec::new(), &unifi, &[]);
 
         assert!(
             result.missed.is_empty(),
@@ -707,7 +838,7 @@ mod tests {
             raw_devices: vec![switch],
             ..Default::default()
         };
-        let result = apply(&mut Vec::new(), &unifi);
+        let result = apply(&mut Vec::new(), &unifi, &[]);
 
         assert_eq!(result.hidden_segments.len(), 1);
         assert_eq!(result.hidden_segments[0].mac_count, 2);
@@ -732,7 +863,7 @@ mod tests {
             clients: vec![record],
             ..Default::default()
         };
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
 
         assert_eq!(result.identity_conflicts.len(), 1);
         assert!(result.identity_conflicts[0].contains("remote-shell"));
@@ -756,7 +887,7 @@ mod tests {
             clients: vec![record],
             ..Default::default()
         };
-        apply(&mut devices, &unifi);
+        apply(&mut devices, &unifi, &[]);
 
         assert_eq!(devices[0].satisfaction, Some(97));
         assert_eq!(devices[0].channel, Some(149));
@@ -778,7 +909,7 @@ mod tests {
             clients: vec![record],
             ..Default::default()
         };
-        apply(&mut devices, &unifi);
+        apply(&mut devices, &unifi, &[]);
 
         assert!(devices[0]
             .type_evidence
@@ -798,7 +929,7 @@ mod tests {
             clients: vec![record],
             ..Default::default()
         };
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
 
         assert_eq!(result.wireless_issues.len(), 1);
         let issue = &result.wireless_issues[0];
@@ -829,7 +960,7 @@ mod tests {
             clients: vec![wired, healthy],
             ..Default::default()
         };
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
         assert!(result.wireless_issues.is_empty());
     }
 
@@ -854,7 +985,7 @@ mod tests {
             clients: vec![good, weak],
             ..Default::default()
         };
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
 
         assert_eq!(result.wireless_issues.len(), 1);
         // The controller alias renamed the device before the issue was filed.
@@ -876,7 +1007,7 @@ mod tests {
             clients: vec![record],
             ..Default::default()
         };
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
 
         assert_eq!(result.identity_conflicts.len(), 1);
         assert!(result.identity_conflicts[0].contains("guest network"));
@@ -889,7 +1020,7 @@ mod tests {
             clients: vec![quiet],
             ..Default::default()
         };
-        assert!(apply(&mut quiet_devices, &unifi)
+        assert!(apply(&mut quiet_devices, &unifi, &[])
             .identity_conflicts
             .is_empty());
     }
@@ -908,12 +1039,109 @@ mod tests {
             raw_devices: vec![switch],
             ..Default::default()
         };
-        let result = apply(&mut Vec::new(), &unifi);
+        let result = apply(&mut Vec::new(), &unifi, &[]);
 
         assert_eq!(result.degraded_links.len(), 1);
         assert_eq!(result.degraded_links[0].port, 5);
         assert!(result.degraded_links[0].explanation.contains("cable"));
         assert!(result.summary.contains("degraded link"));
+    }
+
+    fn network(name: &str, subnet: &str, vlan: Option<u32>) -> crate::unifi::model::UnifiNetworkSummary {
+        crate::unifi::model::UnifiNetworkSummary {
+            name: name.into(),
+            purpose: Some("corporate".into()),
+            subnet: Some(subnet.into()),
+            vlan,
+            enabled: true,
+            dhcp: Some(true),
+        }
+    }
+
+    #[test]
+    fn a_configured_network_no_target_covered_is_a_blind_spot() {
+        let unifi = UnifiSnapshot {
+            networks: vec![
+                network("Main", "10.0.3.0/24", None),
+                network("IoT", "10.0.30.0/24", Some(30)),
+            ],
+            ..Default::default()
+        };
+
+        let result = apply(&mut Vec::new(), &unifi, &["10.0.3.0/24".to_string()]);
+
+        assert_eq!(result.unscanned_networks.len(), 1);
+        let blind = &result.unscanned_networks[0];
+        assert_eq!(blind.name, "IoT");
+        assert_eq!(blind.vlan, Some(30));
+        assert!(blind.explanation.contains("VLAN 30"));
+        assert!(result.summary.contains("never scanned"));
+    }
+
+    #[test]
+    fn overlap_with_any_target_counts_as_covered() {
+        // A /22 target spans several /24 configured networks.
+        let unifi = UnifiSnapshot {
+            networks: vec![network("Main", "10.0.1.0/24", None)],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &["10.0.0.0/22".to_string()]);
+        assert!(result.unscanned_networks.is_empty());
+    }
+
+    #[test]
+    fn wan_vpn_and_disabled_networks_are_not_blind_spots() {
+        let mut wan = network("WAN", "203.0.113.0/24", None);
+        wan.purpose = Some("wan".into());
+        let mut vpn = network("Road warriors", "192.168.99.0/24", None);
+        vpn.purpose = Some("remote-user-vpn".into());
+        let mut disabled = network("Old lab", "10.9.9.0/24", None);
+        disabled.enabled = false;
+
+        let unifi = UnifiSnapshot {
+            networks: vec![wan, vpn, disabled],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &[]);
+        assert!(result.unscanned_networks.is_empty());
+    }
+
+    #[test]
+    fn a_missed_device_on_a_blind_spot_network_gets_the_concrete_explanation() {
+        let mut record = client("aa:aa:aa:aa:aa:aa", "Camera");
+        record.ip = Some("10.0.30.42".into());
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            networks: vec![network("IoT", "10.0.30.0/24", Some(30))],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &["10.0.3.0/24".to_string()]);
+
+        assert_eq!(result.missed.len(), 1);
+        assert!(
+            result.missed[0].explanation.contains("\"IoT\""),
+            "the guess must upgrade to a named network: {}",
+            result.missed[0].explanation
+        );
+        assert!(result.missed[0].explanation.contains("expected, not a fault"));
+    }
+
+    #[test]
+    fn a_vlan_number_resolves_to_the_configured_network_name() {
+        let mut devices = vec![device("10.0.30.5", Some("bb:bb:bb:bb:bb:bb"), "x", &[])];
+        let mut record = client("bb:bb:bb:bb:bb:bb", "Sensor");
+        record.vlan = Some(30);
+        // No network name on the client record — only the number.
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            networks: vec![network("IoT", "10.0.30.0/24", Some(30))],
+            ..Default::default()
+        };
+        apply(&mut devices, &unifi, &["10.0.30.0/24".to_string()]);
+
+        assert_eq!(devices[0].unifi_network.as_deref(), Some("IoT"));
     }
 
     #[test]
@@ -934,7 +1162,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = apply(&mut devices, &unifi);
+        let result = apply(&mut devices, &unifi, &[]);
         assert!(result.summary.contains("accounted for"));
         assert!(result.shadow.is_empty() && result.missed.is_empty());
     }

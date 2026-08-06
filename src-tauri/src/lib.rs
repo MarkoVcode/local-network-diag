@@ -218,8 +218,17 @@ async fn execute_scan(
                     match credentials::load(&config) {
                         Ok(password) => match unifi::fetch(&config, &password).await {
                             Ok(unifi_snapshot) => {
-                                let reconciliation =
-                                    unifi::correlate::apply(&mut snapshot.devices, &unifi_snapshot);
+                                let scanned: Vec<String> = snapshot
+                                    .host
+                                    .scan_targets
+                                    .iter()
+                                    .map(|target| target.cidr.clone())
+                                    .collect();
+                                let reconciliation = unifi::correlate::apply(
+                                    &mut snapshot.devices,
+                                    &unifi_snapshot,
+                                    &scanned,
+                                );
                                 snapshot.warnings.extend(unifi_snapshot.warnings.clone());
                                 snapshot.unifi = Some(unifi_snapshot);
                                 snapshot.reconciliation = Some(reconciliation);

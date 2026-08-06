@@ -235,6 +235,73 @@ impl UnifiDeviceRecord {
     }
 }
 
+/// One entry from `rest/networkconf` — a network as the operator *configured*
+/// it, as opposed to the networks this machine happens to be attached to.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnifiNetworkConf {
+    pub name: Option<String>,
+    /// `corporate`, `guest`, `wan`, `vlan-only`, `vpn-client`, …
+    pub purpose: Option<String>,
+    /// Gateway address with prefix, e.g. `10.0.30.1/24`.
+    pub ip_subnet: Option<String>,
+    /// Number in current releases, string in some older ones.
+    pub vlan: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+    pub vlan_enabled: Option<bool>,
+    pub dhcpd_enabled: Option<bool>,
+}
+
+impl UnifiNetworkConf {
+    pub fn vlan_id(&self) -> Option<u32> {
+        match self.vlan.as_ref()? {
+            serde_json::Value::Number(n) => n.as_u64().and_then(|v| u32::try_from(v).ok()),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
+}
+
+/// The configured network as stored in a snapshot, for the UI and correlation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiNetworkSummary {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// Canonical network address, e.g. `10.0.30.0/24` — the configured
+    /// `ip_subnet` is the *gateway's* address, which would mislead a reader.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subnet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u32>,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dhcp: Option<bool>,
+}
+
+impl From<&UnifiNetworkConf> for UnifiNetworkSummary {
+    fn from(record: &UnifiNetworkConf) -> Self {
+        let subnet = record.ip_subnet.as_deref().map(|raw| {
+            crate::netutil::parse_cidr_any(raw)
+                .map(|cidr| cidr.canonical())
+                .unwrap_or_else(|_| raw.to_string())
+        });
+        Self {
+            name: record
+                .name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| "unnamed network".to_string()),
+            purpose: record.purpose.clone(),
+            subnet,
+            vlan: record.vlan_id(),
+            enabled: record.enabled.unwrap_or(true),
+            dhcp: record.dhcpd_enabled,
+        }
+    }
+}
+
 /// One entry from `stat/health` — the controller's own verdict on a subsystem
 /// (`wan`, `www`, `lan`, `wlan`, `vpn`).
 ///
@@ -373,6 +440,10 @@ pub struct UnifiSnapshot {
     /// Per-subsystem health verdicts. Defaulted so pre-1.2 snapshots load.
     #[serde(default)]
     pub health: Vec<UnifiHealthSummary>,
+    /// Networks as configured on the controller — including ones this machine
+    /// cannot see. Defaulted so pre-1.2 snapshots load.
+    #[serde(default)]
+    pub networks: Vec<UnifiNetworkSummary>,
     /// The LAN-or-internet triage sentence derived from `health`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wan_triage: Option<String>,
@@ -662,6 +733,45 @@ mod tests {
             Some("10.0.3.50"),
             "the historical record's stale IP must not win"
         );
+    }
+
+    #[test]
+    fn parses_network_configs_and_canonicalizes_the_subnet() {
+        // ip_subnet is the *gateway's* address; the summary must show the network.
+        let record: UnifiNetworkConf = serde_json::from_str(
+            r#"{"name":"IoT","purpose":"corporate","ip_subnet":"10.0.30.1/24",
+                "vlan":30,"enabled":true,"dhcpd_enabled":true}"#,
+        )
+        .unwrap();
+        let summary = UnifiNetworkSummary::from(&record);
+
+        assert_eq!(summary.name, "IoT");
+        assert_eq!(summary.subnet.as_deref(), Some("10.0.30.0/24"));
+        assert_eq!(summary.vlan, Some(30));
+        assert!(summary.enabled);
+        assert_eq!(summary.dhcp, Some(true));
+    }
+
+    #[test]
+    fn vlan_ids_parse_from_both_number_and_string_forms() {
+        let number: UnifiNetworkConf = serde_json::from_str(r#"{"vlan":30}"#).unwrap();
+        assert_eq!(number.vlan_id(), Some(30));
+
+        let string: UnifiNetworkConf = serde_json::from_str(r#"{"vlan":"30"}"#).unwrap();
+        assert_eq!(string.vlan_id(), Some(30), "older releases send a string");
+
+        let junk: UnifiNetworkConf = serde_json::from_str(r#"{"vlan":"untagged"}"#).unwrap();
+        assert_eq!(junk.vlan_id(), None);
+    }
+
+    #[test]
+    fn a_wide_configured_subnet_survives_canonicalization() {
+        // /16 is wider than the scanner would ever accept as a target, but a
+        // controller may legitimately define it; it must not be mangled.
+        let record: UnifiNetworkConf =
+            serde_json::from_str(r#"{"name":"Big","ip_subnet":"10.20.30.1/16"}"#).unwrap();
+        let summary = UnifiNetworkSummary::from(&record);
+        assert_eq!(summary.subnet.as_deref(), Some("10.20.0.0/16"));
     }
 
     fn health(subsystem: &str, status: &str) -> UnifiHealthSummary {

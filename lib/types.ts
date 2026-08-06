@@ -260,6 +260,18 @@ export interface UnifiHealthSummary {
   disconnected?: number;
 }
 
+/** A network as configured on the controller (rest/networkconf). */
+export interface UnifiNetworkSummary {
+  name: string;
+  /** `corporate`, `guest`, `wan`, `vlan-only`, `vpn-client`, … */
+  purpose?: string;
+  /** Canonical network address, e.g. "10.0.30.0/24". */
+  subnet?: string;
+  vlan?: number;
+  enabled: boolean;
+  dhcp?: boolean;
+}
+
 export interface UnifiSnapshot {
   controllerHost: string;
   site: string;
@@ -268,6 +280,8 @@ export interface UnifiSnapshot {
   health?: UnifiHealthSummary[];
   /** The LAN-or-internet triage sentence derived from health. */
   wanTriage?: string;
+  /** Networks as configured on the controller. Absent before 1.2. */
+  networks?: UnifiNetworkSummary[];
   warnings: string[];
 }
 
@@ -312,6 +326,15 @@ export interface WirelessHealthIssue {
   explanation: string;
 }
 
+/** A network the controller defines but no scan target covered. */
+export interface UnscannedNetwork {
+  name: string;
+  subnet: string;
+  vlan?: number;
+  purpose?: string;
+  explanation: string;
+}
+
 /** A switch port linked far below what its own hardware demonstrates. */
 export interface DegradedLink {
   switchName: string;
@@ -331,6 +354,7 @@ export interface Reconciliation {
   /** Absent on snapshots stored before 1.2. */
   wirelessIssues?: WirelessHealthIssue[];
   degradedLinks?: DegradedLink[];
+  unscannedNetworks?: UnscannedNetwork[];
   summary: string;
 }
 

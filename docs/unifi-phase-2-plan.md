@@ -96,7 +96,7 @@ answers the question every home user actually has.
 
 ---
 
-## WP3 — Configured networks: scan what the controller knows (`rest/networkconf`)
+## WP3 — Configured networks: scan what the controller knows (`rest/networkconf`) ✅ (implemented)
 
 - **Endpoint**: add `("rest/networkconf", "configured networks")`.
 - **Model**: `NetworkConf { name, purpose, ip_subnet, vlan, enabled,
