@@ -108,6 +108,15 @@ export function NetworksPanel({
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium">{network.name}</span>
                           {active && <StatusBadge tone="good" label="Active" />}
+                          {network.hasUnifi && (
+                            <span
+                              className="rounded border px-1 text-[9px] font-semibold uppercase tracking-wide"
+                              style={{ borderColor: "var(--border-strong)", color: "var(--series-1)" }}
+                              title="A UniFi controller is configured for this network"
+                            >
+                              UniFi
+                            </span>
+                          )}
                           {weak && (
                             <StatusBadge tone="warning" label="Weak fingerprint" />
                           )}

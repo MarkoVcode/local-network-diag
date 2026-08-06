@@ -189,6 +189,21 @@ export interface Device {
   vlan?: number;
   rssi?: number;
   isWired?: boolean;
+  /** The controller's 0–100 experience score for this client. */
+  satisfaction?: number;
+  channel?: number;
+  /** Normalized radio generation, e.g. "Wi-Fi 6 (ax)". */
+  wifiGeneration?: string;
+  /** Traffic counters from the controller's perspective (shown as TX/RX). */
+  txBytes?: number;
+  rxBytes?: number;
+  /** Seconds this client has been associated, per the controller. */
+  unifiUptime?: number;
+  /** Epoch seconds the controller first ever saw this client. */
+  unifiFirstSeen?: number;
+  isGuest?: boolean;
+  /** Operator note typed into the controller. */
+  unifiNote?: string;
 }
 
 /* --------------------------------------------------------------------- UniFi */
@@ -213,12 +228,85 @@ export interface UnifiDeviceSummary {
   adopted: boolean;
   upgradable: boolean;
   uptimeSeconds?: number;
+  /** Present only when the device is in an abnormal state, e.g. "Heartbeat missed". */
+  stateLabel?: string;
+  /** Physical ports, for switches. Absent on pre-1.2 snapshots. */
+  ports?: UnifiPortSummary[];
+}
+
+export interface UnifiPortSummary {
+  index: number;
+  name?: string;
+  up: boolean;
+  /** Negotiated speed in Mbps, when the port is up. */
+  speedMbps?: number;
+  poeWatts?: number;
+}
+
+/** One `stat/health` subsystem verdict (wan, www, lan, wlan, vpn). */
+export interface UnifiHealthSummary {
+  subsystem: string;
+  /** `ok`, `warning`, `error` or `unknown`, as the controller reports it. */
+  status: string;
+  wanIp?: string;
+  gatewayName?: string;
+  latencyMs?: number;
+  xputUpMbps?: number;
+  xputDownMbps?: number;
+  drops?: number;
+  clients?: number;
+  guests?: number;
+  adopted?: number;
+  disconnected?: number;
+}
+
+/** A network as configured on the controller (rest/networkconf). */
+export interface UnifiNetworkSummary {
+  name: string;
+  /** `corporate`, `guest`, `wan`, `vlan-only`, `vpn-client`, … */
+  purpose?: string;
+  /** Canonical network address, e.g. "10.0.30.0/24". */
+  subnet?: string;
+  vlan?: number;
+  enabled: boolean;
+  dhcp?: boolean;
+}
+
+/** An active alarm, worded by the controller itself. */
+export interface UnifiAlarmSummary {
+  message: string;
+  subsystem?: string;
+  /** Epoch seconds. */
+  time?: number;
+}
+
+/** A foreign AP overheard by the site's own radios. */
+export interface NeighborApSummary {
+  ssid?: string;
+  bssid?: string;
+  channel?: number;
+  signalDbm?: number;
+  security?: string;
+  /** A foreign radio broadcasting one of this site's own SSIDs. */
+  evilTwin: boolean;
 }
 
 export interface UnifiSnapshot {
   controllerHost: string;
   site: string;
   devices: UnifiDeviceSummary[];
+  /** Absent on snapshots stored before 1.2. */
+  health?: UnifiHealthSummary[];
+  /** The LAN-or-internet triage sentence derived from health. */
+  wanTriage?: string;
+  /** Networks as configured on the controller. Absent before 1.2. */
+  networks?: UnifiNetworkSummary[];
+  /** Active alarms. Absent before 1.2. */
+  alarms?: UnifiAlarmSummary[];
+  /** Strongest overheard foreign APs (evil twins always included). */
+  neighborAps?: NeighborApSummary[];
+  /** Total overheard APs before the strongest-N cut. */
+  neighborApTotal?: number;
   warnings: string[];
 }
 
@@ -253,6 +341,44 @@ export interface HiddenSegment {
   explanation: string;
 }
 
+/** A wireless client whose connection the controller itself rates as poor. */
+export interface WirelessHealthIssue {
+  ip: string;
+  displayName: string;
+  satisfaction?: number;
+  signalDbm?: number;
+  accessPoint?: string;
+  explanation: string;
+}
+
+/** A client the controller's event log shows repeatedly dropping off. */
+export interface FlappingClient {
+  mac: string;
+  name: string;
+  /** Disconnect events inside the event window (24 h). */
+  disconnects: number;
+  accessPoint?: string;
+  explanation: string;
+}
+
+/** A network the controller defines but no scan target covered. */
+export interface UnscannedNetwork {
+  name: string;
+  subnet: string;
+  vlan?: number;
+  purpose?: string;
+  explanation: string;
+}
+
+/** A switch port linked far below what its own hardware demonstrates. */
+export interface DegradedLink {
+  switchName: string;
+  port: number;
+  portName?: string;
+  speedMbps: number;
+  explanation: string;
+}
+
 /** Where the scan and the controller disagree — the point of the integration. */
 export interface Reconciliation {
   matched: number;
@@ -260,6 +386,11 @@ export interface Reconciliation {
   missed: MissedDevice[];
   hiddenSegments: HiddenSegment[];
   identityConflicts: string[];
+  /** Absent on snapshots stored before 1.2. */
+  wirelessIssues?: WirelessHealthIssue[];
+  degradedLinks?: DegradedLink[];
+  unscannedNetworks?: UnscannedNetwork[];
+  flappingClients?: FlappingClient[];
   summary: string;
 }
 
@@ -285,6 +416,8 @@ export interface NetworkProfile {
   createdAt: string;
   lastSeenAt?: string;
   scanCount: number;
+  /** A UniFi controller is configured for this network. Set by list_networks. */
+  hasUnifi?: boolean;
 }
 
 export interface NetworkCandidate {
@@ -541,6 +674,8 @@ export interface ScanStatus {
 export type ScanEvent =
   | { type: "phase"; phases: PhaseState[] }
   | { type: "warning"; message: string }
+  /** The scan was filed under a different network than the one selected. */
+  | { type: "networkChanged"; id: string; name: string }
   | { type: "done"; snapshotId: string }
   | { type: "error"; message: string }
   | { type: "cancelled" };

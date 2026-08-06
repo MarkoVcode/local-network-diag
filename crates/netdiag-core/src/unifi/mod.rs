@@ -17,12 +17,21 @@ pub use client::{Established, Flavour, UnifiClient, UnifiError};
 pub use config::UnifiConfig;
 pub use model::{UnifiClientRecord, UnifiDeviceRecord, UnifiSnapshot};
 
-/// Endpoints fetched in a Phase 1 pass, with the label used if one fails.
+/// Endpoints fetched in one pass, with the label used if one fails.
 const ENDPOINTS: &[(&str, &str)] = &[
     ("stat/sta", "active clients"),
     ("stat/device", "managed devices"),
     ("stat/alluser", "known clients"),
+    ("stat/health", "site health"),
+    ("rest/networkconf", "configured networks"),
+    // Query strings ride along: `get_data` appends the endpoint verbatim.
+    ("stat/event?_limit=200&within=24", "recent events"),
+    ("list/alarm?archived=false", "active alarms"),
+    ("stat/rogueap?within=24", "nearby access points"),
 ];
+
+/// Keep only the strongest few neighbors; evil twins always survive the cut.
+const NEIGHBOR_AP_CAP: usize = 30;
 
 /// Signs in, fetches everything, signs out.
 ///
@@ -47,9 +56,13 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
         ));
     }
 
+    let mut raw_alarms: Vec<model::UnifiAlarmRecord> = Vec::new();
+    let mut raw_rogues: Vec<model::UnifiRogueApRecord> = Vec::new();
+
     for (endpoint, label) in ENDPOINTS {
         match client.get_data(&config.site, endpoint).await {
-            Ok(value) => match *endpoint {
+            // Matching on the path alone keeps query strings out of the arms.
+            Ok(value) => match endpoint.split('?').next().unwrap_or(endpoint) {
                 "stat/sta" => snapshot.clients = parse_list(value),
                 "stat/alluser" => snapshot.known_clients = parse_list(value),
                 "stat/device" => {
@@ -57,21 +70,64 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
                     snapshot.devices = devices.iter().map(Into::into).collect();
                     snapshot.raw_devices = devices;
                 }
+                "stat/health" => {
+                    let records: Vec<model::UnifiHealthRecord> = parse_list(value);
+                    snapshot.health = records.iter().map(Into::into).collect();
+                }
+                "rest/networkconf" => {
+                    let records: Vec<model::UnifiNetworkConf> = parse_list(value);
+                    snapshot.networks = records.iter().map(Into::into).collect();
+                }
+                "stat/event" => snapshot.raw_events = parse_list(value),
+                "list/alarm" => raw_alarms = parse_list(value),
+                "stat/rogueap" => raw_rogues = parse_list(value),
                 _ => {}
             },
-            Err(error) => snapshot
-                .warnings
-                .push(format!("Could not read {label}: {error}")),
+            Err(error) => {
+                let mut message = format!("Could not read {label}: {error}");
+                // `rest/` is configuration, which some read-only roles cannot
+                // see even though they can read every `stat/` collection. Name
+                // the fix, since "forbidden" alone points nowhere.
+                if error == UnifiError::Forbidden && endpoint.starts_with("rest/") {
+                    message.push_str(
+                        " — reading configuration needs the account's Network role \
+                         to be Viewer (or higher), not a restricted read-only role.",
+                    );
+                }
+                snapshot.warnings.push(message);
+            }
         }
     }
 
     client.logout().await;
+
+    snapshot.wan_triage = model::wan_triage(&snapshot.health);
+    snapshot.alarms = raw_alarms
+        .iter()
+        .filter_map(model::UnifiAlarmRecord::summarize)
+        .collect();
+
+    // The evil-twin check compares overheard SSIDs against the ones this
+    // site's own clients associate to. Client records are the best available
+    // source of "our SSIDs" without fetching the WLAN configuration.
+    let own_ssids: std::collections::HashSet<String> = snapshot
+        .clients
+        .iter()
+        .chain(&snapshot.known_clients)
+        .filter_map(|client| client.essid.clone())
+        .filter(|ssid| !ssid.trim().is_empty())
+        .collect();
+    let (neighbors, total) =
+        model::summarize_neighbor_aps(&raw_rogues, &own_ssids, NEIGHBOR_AP_CAP);
+    snapshot.neighbor_aps = neighbors;
+    snapshot.neighbor_ap_total = total;
 
     // Losing every collection means the credentials work but the account can see
     // nothing — worth surfacing as an error rather than an empty success.
     if snapshot.clients.is_empty()
         && snapshot.known_clients.is_empty()
         && snapshot.raw_devices.is_empty()
+        && snapshot.health.is_empty()
         && !snapshot.warnings.is_empty()
     {
         return Err(UnifiError::Forbidden);

@@ -152,6 +152,90 @@ async fn arm_next_run(state: &AppState) {
     guard.next_run_at = Some(chrono::Utc::now() + chrono::Duration::minutes(minutes));
 }
 
+/// Files the scan under the network the machine is actually on.
+///
+/// The dropdown selects which history is *viewed*; where a scan is *written*
+/// must follow the physical network, or two sites' results end up mixed in one
+/// history — the exact failure the per-network split exists to prevent. A
+/// definitive or strong match to another saved network switches to it; an
+/// unrecognised network gets a profile created for it. Only the genuinely
+/// ambiguous case (subnet-only match to the selected network) stays put,
+/// because there the evidence cannot tell sites apart.
+///
+/// Returns warnings to attach to the snapshot so the decision is visible.
+async fn route_scan_to_network(app: &AppHandle, state: &AppState) -> Vec<String> {
+    let (_host, fingerprint) = networks::probe_current().await;
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+    index.active = state
+        .active_network
+        .lock()
+        .await
+        .clone()
+        .or_else(|| index.active.clone());
+
+    match index.detect(&fingerprint) {
+        Detection::Current { .. } | Detection::NoNetwork => Vec::new(),
+
+        // The selected network is among the indistinguishable candidates: keep
+        // it, but say so — guessing differently would be no better.
+        Detection::Ambiguous { candidates }
+            if index
+                .active
+                .as_deref()
+                .map(|active| candidates.iter().any(|c| c.id == active))
+                .unwrap_or(false) =>
+        {
+            vec![
+                "Several saved networks share this subnet and nothing observable tells them \
+                 apart, so the scan was filed under the selected one. Refreshing the network's \
+                 fingerprint while on site makes future scans unambiguous."
+                    .to_string(),
+            ]
+        }
+
+        Detection::Switch { id, name, .. } => {
+            index.active = Some(id.clone());
+            let _ = index.save(root).await;
+            *state.active_network.lock().await = Some(id.clone());
+            let _ = app.emit(
+                PROGRESS_EVENT,
+                &ScanEvent::NetworkChanged {
+                    id,
+                    name: name.clone(),
+                },
+            );
+            vec![format!(
+                "This machine is on \"{name}\", so the scan was filed under that network \
+                 instead of the previously selected one."
+            )]
+        }
+
+        detection @ (Detection::Unknown { .. } | Detection::Ambiguous { .. }) => {
+            let name = match detection {
+                Detection::Unknown { suggested_name } => suggested_name,
+                _ => fingerprint.describe(),
+            };
+            let profile = NetworkProfile::new(name.clone(), fingerprint);
+            let id = index.add(profile);
+            let _ = tokio::fs::create_dir_all(NetworkIndex::scans_dir(root, &id)).await;
+            let _ = index.save(root).await;
+            *state.active_network.lock().await = Some(id.clone());
+            let _ = app.emit(
+                PROGRESS_EVENT,
+                &ScanEvent::NetworkChanged {
+                    id,
+                    name: name.clone(),
+                },
+            );
+            vec![format!(
+                "This machine is not on any saved network, so \"{name}\" was created and the \
+                 scan filed there. It can be renamed under Networks."
+            )]
+        }
+    }
+}
+
 /// Runs a scan, streaming progress to the frontend. Shared by the manual button
 /// and the auto-repeat timer so both behave identically.
 async fn execute_scan(
@@ -168,6 +252,18 @@ async fn execute_scan(
         *running = Some(handle.clone());
         handle
     };
+
+    // Must precede `state.store()`: the store is bound to whichever network is
+    // active when the scan starts writing.
+    let routing_warnings = route_scan_to_network(&app, &state).await;
+    for message in &routing_warnings {
+        let _ = app.emit(
+            PROGRESS_EVENT,
+            &ScanEvent::Warning {
+                message: message.clone(),
+            },
+        );
+    }
 
     // The scan callback is synchronous, so progress is funnelled through a
     // channel and forwarded by a task that can await the emit.
@@ -207,6 +303,9 @@ async fn execute_scan(
 
     let result = match result {
         Ok(mut snapshot) => {
+            // The routing decision travels with the snapshot it applied to.
+            snapshot.warnings.extend(routing_warnings.iter().cloned());
+
             // Controller correlation runs after the scan, in this layer, because
             // the engine deliberately holds no credentials. A controller that is
             // unreachable degrades to a warning: the scan itself is still valid.
@@ -218,8 +317,17 @@ async fn execute_scan(
                     match credentials::load(&config) {
                         Ok(password) => match unifi::fetch(&config, &password).await {
                             Ok(unifi_snapshot) => {
-                                let reconciliation =
-                                    unifi::correlate::apply(&mut snapshot.devices, &unifi_snapshot);
+                                let scanned: Vec<String> = snapshot
+                                    .host
+                                    .scan_targets
+                                    .iter()
+                                    .map(|target| target.cidr.clone())
+                                    .collect();
+                                let reconciliation = unifi::correlate::apply(
+                                    &mut snapshot.devices,
+                                    &unifi_snapshot,
+                                    &scanned,
+                                );
                                 snapshot.warnings.extend(unifi_snapshot.warnings.clone());
                                 snapshot.unifi = Some(unifi_snapshot);
                                 snapshot.reconciliation = Some(reconciliation);
@@ -396,19 +504,43 @@ async fn run_doctor(state: State<'_, Arc<AppState>>, force: bool) -> Result<Doct
 
 /* -------------------------------------------------------------------- networks */
 
+/// A saved network plus UI-only facts about it. `has_unifi` lives here rather
+/// than on the core profile because it is derived from the network's settings
+/// directory, not part of its identity.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkEntry {
+    #[serde(flatten)]
+    profile: NetworkProfile,
+    /// A UniFi controller is configured for this network — the integration is
+    /// per network, so the label tells the user where controller data applies.
+    has_unifi: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NetworkList {
     active: Option<String>,
-    networks: Vec<NetworkProfile>,
+    networks: Vec<NetworkEntry>,
 }
 
 #[tauri::command]
 async fn list_networks(state: State<'_, Arc<AppState>>) -> Result<NetworkList, String> {
     let index = NetworkIndex::load(state.settings_root()).await;
+
+    let mut networks = Vec::with_capacity(index.networks.len());
+    for profile in index.networks {
+        let dir = NetworkIndex::network_dir(state.settings_root(), &profile.id);
+        let has_unifi = UnifiConfig::load(&dir)
+            .await
+            .map(|config| config.is_configured())
+            .unwrap_or(false);
+        networks.push(NetworkEntry { profile, has_unifi });
+    }
+
     Ok(NetworkList {
         active: state.active_network.lock().await.clone().or(index.active),
-        networks: index.networks,
+        networks,
     })
 }
 

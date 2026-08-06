@@ -351,6 +351,15 @@ pub fn correlate(input: CorrelateInput) -> Vec<Device> {
             vlan: None,
             rssi: None,
             is_wired: None,
+            satisfaction: None,
+            channel: None,
+            wifi_generation: None,
+            tx_bytes: None,
+            rx_bytes: None,
+            unifi_uptime: None,
+            unifi_first_seen: None,
+            is_guest: None,
+            unifi_note: None,
         });
         if !device.discovered_by.iter().any(|s| s == source) {
             device.discovered_by.push(source.to_string());

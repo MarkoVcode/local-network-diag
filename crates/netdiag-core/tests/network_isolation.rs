@@ -86,6 +86,15 @@ fn snapshot(id: &str, device_ips: &[&str]) -> ScanSnapshot {
                 vlan: None,
                 rssi: None,
                 is_wired: None,
+                satisfaction: None,
+                channel: None,
+                wifi_generation: None,
+                tx_bytes: None,
+                rx_bytes: None,
+                unifi_uptime: None,
+                unifi_first_seen: None,
+                is_guest: None,
+                unifi_note: None,
             })
             .collect(),
         connectivity: ConnectivityInfo {

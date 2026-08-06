@@ -322,6 +322,32 @@ pub struct Device {
     pub rssi: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_wired: Option<bool>,
+    /// The controller's 0–100 experience score for this client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub satisfaction: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u32>,
+    /// Normalized radio generation, e.g. "Wi-Fi 6 (ax)".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi_generation: Option<String>,
+    /// Traffic counters as the controller reports them. Direction is the
+    /// controller's perspective, so they are shown as TX/RX rather than
+    /// up/down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_bytes: Option<i64>,
+    /// Seconds this client has been associated, per the controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_uptime: Option<i64>,
+    /// Epoch seconds the controller first ever saw this client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_first_seen: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_guest: Option<bool>,
+    /// Operator note typed into the controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_note: Option<String>,
 }
 
 /* -------------------------------------------------------------- connectivity */
@@ -618,6 +644,10 @@ pub enum ScanEvent {
     Phase { phases: Vec<PhaseState> },
     #[serde(rename_all = "camelCase")]
     Warning { message: String },
+    /// The scan was filed under a different network than the one selected,
+    /// because that is where the machine actually is.
+    #[serde(rename_all = "camelCase")]
+    NetworkChanged { id: String, name: String },
     #[serde(rename_all = "camelCase")]
     Done { snapshot_id: String },
     #[serde(rename_all = "camelCase")]

@@ -198,6 +198,12 @@ export function DesktopApp() {
             setRunning(true);
             setPhases(event.phases);
             break;
+          case "networkChanged":
+            // The scan was filed under the network the machine is actually on;
+            // follow it so the dropdown and history match what was written.
+            setSnapshot(null);
+            refreshNetworks();
+            break;
           case "done":
             setRunning(false);
             setRefreshToken((token) => token + 1);
@@ -219,7 +225,7 @@ export function DesktopApp() {
       });
 
     return () => unlisten?.();
-  }, [loadSnapshot]);
+  }, [loadSnapshot, refreshNetworks]);
 
   const blocked = doctor?.blocked ?? false;
 
@@ -362,90 +368,33 @@ export function DesktopApp() {
           })}
         </nav>
 
-        {/* Scan controls dock to the sidebar rather than floating in a header. */}
+        {/* Scan controls dock to the sidebar rather than floating in a header.
+            While a scan runs, the same dock becomes the progress display: it is
+            always visible (the sidebar never scrolls away), stage by stage. */}
         <div className="border-t p-3" style={{ borderColor: "var(--border)" }}>
           {running ? (
-            <Button variant="danger" onClick={() => api.cancelScan()}>
-              Cancel scan
-            </Button>
+            <ScanDock phases={phases} />
           ) : (
-            <Button
-              variant="primary"
-              onClick={startScan}
-              disabled={blocked}
-              title={blocked ? "A required capability is unavailable" : undefined}
-            >
-              Run scan
-            </Button>
+            <>
+              <Button
+                variant="primary"
+                onClick={startScan}
+                disabled={blocked}
+                title={blocked ? "A required capability is unavailable" : undefined}
+              >
+                Run scan
+              </Button>
+
+              <ScanOptions
+                portProfile={portProfile}
+                setPortProfile={setPortProfile}
+                extraRange={extraRange}
+                setExtraRange={setExtraRange}
+                autoRepeat={autoRepeat}
+                updateAutoRepeat={updateAutoRepeat}
+              />
+            </>
           )}
-
-          <label
-            className="mt-3 block text-[11px]"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            Ports
-            <select
-              value={portProfile}
-              onChange={(e) => setPortProfile(e.target.value as PortProfile)}
-              disabled={running}
-              className="mt-1 w-full rounded-lg border px-2 py-1 text-xs"
-              style={{
-                borderColor: "var(--border-strong)",
-                background: "var(--surface-raised)",
-                color: "var(--text-primary)",
-              }}
-            >
-              <option value="quick">Quick (~15)</option>
-              <option value="standard">Standard (~40)</option>
-              <option value="deep">Deep (~150)</option>
-            </select>
-          </label>
-
-          <label
-            className="mt-2 block text-[11px]"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            Extra range
-            <input
-              type="text"
-              value={extraRange}
-              onChange={(e) => setExtraRange(e.target.value)}
-              placeholder="192.168.1.0/24"
-              disabled={running}
-              className="mt-1 w-full rounded-lg border px-2 py-1 text-xs"
-              style={{
-                borderColor: "var(--border-strong)",
-                background: "var(--surface-raised)",
-                color: "var(--text-primary)",
-              }}
-            />
-          </label>
-
-          <label
-            className="mt-2 flex items-center gap-1.5 text-[11px]"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <input
-              type="checkbox"
-              checked={autoRepeat.enabled}
-              onChange={(e) => updateAutoRepeat(e.target.checked, autoRepeat.intervalMinutes)}
-            />
-            Repeat every
-            <select
-              value={autoRepeat.intervalMinutes}
-              onChange={(e) => updateAutoRepeat(autoRepeat.enabled, Number(e.target.value))}
-              className="rounded border px-1 py-0.5 text-[11px]"
-              style={{
-                borderColor: "var(--border-strong)",
-                background: "var(--surface-raised)",
-                color: "var(--text-primary)",
-              }}
-            >
-              <option value={5}>5m</option>
-              <option value={15}>15m</option>
-              <option value={60}>60m</option>
-            </select>
-          </label>
         </div>
       </aside>
 
@@ -467,8 +416,6 @@ export function DesktopApp() {
           {section !== "setup" && (
             <CapabilityBanner report={doctor} onOpenSetup={() => setSection("setup")} />
           )}
-
-          {running && <ProgressPanel phases={phases} />}
 
           {section === "setup" ? (
             <div className="space-y-4">
@@ -623,73 +570,183 @@ export function DesktopApp() {
   );
 }
 
-function ProgressPanel({ phases }: { phases: PhaseState[] }) {
-  const active = phases.find((p) => p.status === "running");
-
+/**
+ * The scan-in-progress view of the sidebar dock.
+ *
+ * It lives where the Run-scan button was, so progress is always on screen —
+ * the sidebar never scrolls — and each stage gets its own bar rather than one
+ * line that scrolls out of the main area.
+ */
+function ScanDock({ phases }: { phases: PhaseState[] }) {
   return (
-    <Card className="mb-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium">
-          {active ? active.label : "Starting…"}
-          {active?.progress && (
-            <span className="ml-2 tabular" style={{ color: "var(--text-secondary)" }}>
-              {active.progress.current}/{active.progress.total}
-            </span>
-          )}
-        </span>
-        <span className="animate-pulse-soft text-xs" style={{ color: "var(--text-secondary)" }}>
-          Scanning…
-        </span>
-      </div>
+    <div>
+      <Button variant="danger" onClick={() => api.cancelScan()}>
+        Cancel scan
+      </Button>
 
-      {active?.progress && (
-        <div
-          className="mt-2 h-1.5 w-full overflow-hidden rounded-full"
-          style={{ background: "var(--gridline)" }}
-          role="progressbar"
-          aria-valuenow={active.progress.current}
-          aria-valuemin={0}
-          aria-valuemax={active.progress.total}
+      {phases.length === 0 ? (
+        <p
+          className="animate-pulse-soft mt-3 text-[11px]"
+          style={{ color: "var(--text-secondary)" }}
         >
-          <div
-            className="h-full rounded-full transition-[width] duration-200"
-            style={{
-              width: `${(active.progress.current / Math.max(1, active.progress.total)) * 100}%`,
-              background: "var(--series-1)",
-            }}
-          />
-        </div>
-      )}
-
-      <ol className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-        {phases.map((phase) => (
-          <li key={phase.phase} className="flex items-center gap-1.5 text-xs">
-            <span
-              aria-hidden
-              style={{
-                color:
-                  phase.status === "done"
-                    ? "var(--status-good)"
-                    : phase.status === "running"
-                      ? "var(--series-1)"
+          Starting…
+        </p>
+      ) : (
+        <ol className="mt-3 space-y-2">
+          {phases.map((phase) => {
+            const indeterminate = phase.status === "running" && !phase.progress;
+            const percent =
+              phase.status === "done"
+                ? 100
+                : phase.status === "running" && phase.progress
+                  ? (phase.progress.current / Math.max(1, phase.progress.total)) * 100
+                  : 0;
+            return (
+              <li key={phase.phase}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span
+                    className="min-w-0 flex-1 truncate text-[11px]"
+                    style={{
+                      color:
+                        phase.status === "pending" || phase.status === "skipped"
+                          ? "var(--text-muted)"
+                          : "var(--text-secondary)",
+                    }}
+                  >
+                    {phase.label}
+                  </span>
+                  <span
+                    className="shrink-0 text-[10px] tabular"
+                    style={{
+                      color:
+                        phase.status === "error" ? "var(--status-critical)" : "var(--text-muted)",
+                    }}
+                  >
+                    {phase.status === "skipped"
+                      ? "skipped"
                       : phase.status === "error"
-                        ? "var(--status-critical)"
-                        : "var(--text-muted)",
-              }}
-            >
-              {phase.status === "done" ? "●" : phase.status === "running" ? "◐" : "○"}
-            </span>
-            <span
-              style={{
-                color: phase.status === "pending" ? "var(--text-muted)" : "var(--text-secondary)",
-              }}
-            >
-              {phase.label}
-            </span>
-          </li>
-        ))}
-      </ol>
-    </Card>
+                        ? "error"
+                        : phase.status === "done"
+                          ? "✓"
+                          : phase.status === "running" && phase.progress
+                            ? `${phase.progress.current}/${phase.progress.total}`
+                            : ""}
+                  </span>
+                </div>
+                <div
+                  className="mt-1 h-1 w-full overflow-hidden rounded-full"
+                  style={{ background: "var(--gridline)" }}
+                  role="progressbar"
+                  aria-label={phase.label}
+                  aria-valuenow={indeterminate ? undefined : Math.round(percent)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className={
+                      indeterminate
+                        ? "animate-pulse-soft h-full rounded-full"
+                        : "h-full rounded-full transition-[width] duration-300"
+                    }
+                    style={{
+                      width: indeterminate ? "100%" : `${percent}%`,
+                      opacity: indeterminate ? 0.45 : 1,
+                      background:
+                        phase.status === "error"
+                          ? "var(--status-critical)"
+                          : phase.status === "done"
+                            ? "var(--status-good)"
+                            : "var(--series-1)",
+                    }}
+                  />
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/** The idle view of the sidebar dock: port profile, extra range, auto-repeat. */
+function ScanOptions({
+  portProfile,
+  setPortProfile,
+  extraRange,
+  setExtraRange,
+  autoRepeat,
+  updateAutoRepeat,
+}: {
+  portProfile: PortProfile;
+  setPortProfile: (profile: PortProfile) => void;
+  extraRange: string;
+  setExtraRange: (range: string) => void;
+  autoRepeat: AutoRepeatState;
+  updateAutoRepeat: (enabled: boolean, intervalMinutes: number) => void;
+}) {
+  return (
+    <>
+      <label className="mt-3 block text-[11px]" style={{ color: "var(--text-secondary)" }}>
+        Ports
+        <select
+          value={portProfile}
+          onChange={(e) => setPortProfile(e.target.value as PortProfile)}
+          className="mt-1 w-full rounded-lg border px-2 py-1 text-xs"
+          style={{
+            borderColor: "var(--border-strong)",
+            background: "var(--surface-raised)",
+            color: "var(--text-primary)",
+          }}
+        >
+          <option value="quick">Quick (~15)</option>
+          <option value="standard">Standard (~40)</option>
+          <option value="deep">Deep (~150)</option>
+        </select>
+      </label>
+
+      <label className="mt-2 block text-[11px]" style={{ color: "var(--text-secondary)" }}>
+        Extra range
+        <input
+          type="text"
+          value={extraRange}
+          onChange={(e) => setExtraRange(e.target.value)}
+          placeholder="192.168.1.0/24"
+          className="mt-1 w-full rounded-lg border px-2 py-1 text-xs"
+          style={{
+            borderColor: "var(--border-strong)",
+            background: "var(--surface-raised)",
+            color: "var(--text-primary)",
+          }}
+        />
+      </label>
+
+      <label
+        className="mt-2 flex items-center gap-1.5 text-[11px]"
+        style={{ color: "var(--text-secondary)" }}
+      >
+        <input
+          type="checkbox"
+          checked={autoRepeat.enabled}
+          onChange={(e) => updateAutoRepeat(e.target.checked, autoRepeat.intervalMinutes)}
+        />
+        Repeat every
+        <select
+          value={autoRepeat.intervalMinutes}
+          onChange={(e) => updateAutoRepeat(autoRepeat.enabled, Number(e.target.value))}
+          className="rounded border px-1 py-0.5 text-[11px]"
+          style={{
+            borderColor: "var(--border-strong)",
+            background: "var(--surface-raised)",
+            color: "var(--text-primary)",
+          }}
+        >
+          <option value={5}>5m</option>
+          <option value={15}>15m</option>
+          <option value={60}>60m</option>
+        </select>
+      </label>
+    </>
   );
 }
 

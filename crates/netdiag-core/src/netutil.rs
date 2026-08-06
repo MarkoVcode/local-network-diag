@@ -36,7 +36,24 @@ impl ParsedCidr {
     }
 }
 
+/// Parses a CIDR for *scanning*: refuses ranges wider than [`MIN_PREFIX`].
 pub fn parse_cidr(input: &str) -> Result<ParsedCidr, String> {
+    let parsed = parse_cidr_any(input)?;
+    if parsed.prefix < MIN_PREFIX {
+        return Err(format!(
+            "Range {} is too large to scan (minimum prefix /{MIN_PREFIX})",
+            input.trim()
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Parses any valid CIDR, without the scan-size guard.
+///
+/// For *interpreting* a range someone else defined — overlap checks against a
+/// controller's configured subnets, canonicalization — never for choosing scan
+/// targets, which must go through [`parse_cidr`].
+pub fn parse_cidr_any(input: &str) -> Result<ParsedCidr, String> {
     let trimmed = input.trim();
     let (addr_part, prefix_part) = trimmed
         .split_once('/')
@@ -51,11 +68,6 @@ pub fn parse_cidr(input: &str) -> Result<ParsedCidr, String> {
 
     if prefix > 32 {
         return Err(format!("Invalid CIDR prefix in {trimmed}"));
-    }
-    if prefix < MIN_PREFIX {
-        return Err(format!(
-            "Range {trimmed} is too large to scan (minimum prefix /{MIN_PREFIX})"
-        ));
     }
 
     let mask: u32 = if prefix == 0 {
