@@ -302,6 +302,166 @@ impl From<&UnifiNetworkConf> for UnifiNetworkSummary {
     }
 }
 
+/// One entry from `stat/event` — the controller's rolling log of connects,
+/// disconnects, roams, adoptions and the like.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnifiEventRecord {
+    /// e.g. `EVT_WU_Disconnected` (wireless user), `EVT_LU_Connected` (LAN user).
+    pub key: Option<String>,
+    pub subsystem: Option<String>,
+    /// Epoch **milliseconds** in every observed release.
+    pub time: Option<i64>,
+    pub msg: Option<String>,
+    /// The client involved: `user` for normal clients, `guest` for guests.
+    #[serde(deserialize_with = "de_mac")]
+    pub user: Option<String>,
+    #[serde(deserialize_with = "de_mac")]
+    pub guest: Option<String>,
+    pub hostname: Option<String>,
+    #[serde(deserialize_with = "de_mac")]
+    pub ap: Option<String>,
+    pub ssid: Option<String>,
+}
+
+impl UnifiEventRecord {
+    pub fn client_mac(&self) -> Option<&str> {
+        self.user.as_deref().or(self.guest.as_deref())
+    }
+
+    /// Event time in epoch seconds, tolerating either unit: a value that would
+    /// place the event thousands of years out is milliseconds.
+    pub fn time_seconds(&self) -> Option<i64> {
+        self.time
+            .map(|t| if t > 100_000_000_000 { t / 1000 } else { t })
+    }
+
+    pub fn is_disconnect(&self) -> bool {
+        self.key
+            .as_deref()
+            .map(|k| k.contains("Disconnected"))
+            .unwrap_or(false)
+    }
+}
+
+/// One entry from `list/alarm`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnifiAlarmRecord {
+    pub key: Option<String>,
+    pub msg: Option<String>,
+    /// Epoch milliseconds, like events.
+    pub time: Option<i64>,
+    pub subsystem: Option<String>,
+    pub archived: Option<bool>,
+}
+
+/// An active alarm as stored in a snapshot. The controller already words these
+/// for humans, so the message passes through verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiAlarmSummary {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subsystem: Option<String>,
+    /// Epoch seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<i64>,
+}
+
+impl UnifiAlarmRecord {
+    pub fn summarize(&self) -> Option<UnifiAlarmSummary> {
+        if self.archived == Some(true) {
+            return None;
+        }
+        let message = self
+            .msg
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| self.key.clone())?;
+        Some(UnifiAlarmSummary {
+            message,
+            subsystem: self.subsystem.clone(),
+            time: self
+                .time
+                .map(|t| if t > 100_000_000_000 { t / 1000 } else { t }),
+        })
+    }
+}
+
+/// One entry from `stat/rogueap` — a foreign access point overheard by the
+/// site's own radios. Pure signal a host scanner can never produce.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnifiRogueApRecord {
+    pub essid: Option<String>,
+    #[serde(deserialize_with = "de_mac")]
+    pub bssid: Option<String>,
+    pub channel: Option<u32>,
+    /// dBm (negative) in most releases.
+    pub signal: Option<i32>,
+    /// dB above noise (small positive) — same fact, other scale.
+    pub rssi: Option<i32>,
+    pub security: Option<String>,
+    pub oui: Option<String>,
+}
+
+/// A neighboring AP as stored in a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeighborApSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bssid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_dbm: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security: Option<String>,
+    /// A foreign radio broadcasting one of this site's own SSIDs — the
+    /// evil-twin signature.
+    pub evil_twin: bool,
+}
+
+/// Summarizes overheard APs: evil twins always survive, the rest keep only the
+/// `cap` strongest. Returns the summaries and the total seen, so the UI can say
+/// "30 of 174" instead of silently truncating.
+pub fn summarize_neighbor_aps(
+    records: &[UnifiRogueApRecord],
+    own_ssids: &std::collections::HashSet<String>,
+    cap: usize,
+) -> (Vec<NeighborApSummary>, usize) {
+    let mut summaries: Vec<NeighborApSummary> = records
+        .iter()
+        .map(|record| {
+            let evil_twin = record
+                .essid
+                .as_deref()
+                .map(|essid| !essid.trim().is_empty() && own_ssids.contains(essid))
+                .unwrap_or(false);
+            NeighborApSummary {
+                ssid: record.essid.clone().filter(|s| !s.trim().is_empty()),
+                bssid: record.bssid.clone(),
+                channel: record.channel,
+                signal_dbm: record
+                    .signal
+                    .filter(|s| *s < 0)
+                    .or(record.rssi.filter(|r| *r < 0)),
+                security: record.security.clone(),
+                evil_twin,
+            }
+        })
+        .collect();
+
+    let total = summaries.len();
+    // Evil twins first, then strongest signal — the order of interest.
+    summaries.sort_by_key(|s| (!s.evil_twin, std::cmp::Reverse(s.signal_dbm.unwrap_or(i32::MIN))));
+    summaries.truncate(cap.max(summaries.iter().filter(|s| s.evil_twin).count()));
+    (summaries, total)
+}
+
 /// One entry from `stat/health` — the controller's own verdict on a subsystem
 /// (`wan`, `www`, `lan`, `wlan`, `vpn`).
 ///
@@ -444,6 +604,16 @@ pub struct UnifiSnapshot {
     /// cannot see. Defaulted so pre-1.2 snapshots load.
     #[serde(default)]
     pub networks: Vec<UnifiNetworkSummary>,
+    /// Active alarms, worded by the controller itself.
+    #[serde(default)]
+    pub alarms: Vec<UnifiAlarmSummary>,
+    /// Foreign APs overheard by the site's radios — evil twins always kept,
+    /// otherwise the strongest few.
+    #[serde(default)]
+    pub neighbor_aps: Vec<NeighborApSummary>,
+    /// How many foreign APs were seen in total, before the strongest-N cut.
+    #[serde(default)]
+    pub neighbor_ap_total: usize,
     /// The LAN-or-internet triage sentence derived from `health`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wan_triage: Option<String>,
@@ -455,6 +625,9 @@ pub struct UnifiSnapshot {
     pub known_clients: Vec<UnifiClientRecord>,
     #[serde(skip, default)]
     pub raw_devices: Vec<UnifiDeviceRecord>,
+    /// Recent events, for correlation only — never persisted.
+    #[serde(skip, default)]
+    pub raw_events: Vec<UnifiEventRecord>,
 }
 
 /// The parts of a managed device worth putting in a snapshot.
@@ -733,6 +906,87 @@ mod tests {
             Some("10.0.3.50"),
             "the historical record's stale IP must not win"
         );
+    }
+
+    #[test]
+    fn event_times_normalize_from_milliseconds() {
+        let event: UnifiEventRecord =
+            serde_json::from_str(r#"{"key":"EVT_WU_Disconnected","time":1754400000000,"user":"AA-BB-CC-DD-EE-FF"}"#)
+                .unwrap();
+        assert_eq!(event.time_seconds(), Some(1_754_400_000));
+        assert!(event.is_disconnect());
+        assert_eq!(event.client_mac(), Some("aa:bb:cc:dd:ee:ff"), "MAC normalized");
+
+        let seconds: UnifiEventRecord =
+            serde_json::from_str(r#"{"key":"EVT_WU_Connected","time":1754400000}"#).unwrap();
+        assert_eq!(seconds.time_seconds(), Some(1_754_400_000), "already-seconds passes through");
+        assert!(!seconds.is_disconnect());
+    }
+
+    #[test]
+    fn guest_events_still_yield_a_client_mac() {
+        let event: UnifiEventRecord =
+            serde_json::from_str(r#"{"key":"EVT_WG_Disconnected","guest":"aa:bb:cc:dd:ee:01"}"#)
+                .unwrap();
+        assert_eq!(event.client_mac(), Some("aa:bb:cc:dd:ee:01"));
+    }
+
+    #[test]
+    fn alarms_summarize_verbatim_and_archived_ones_vanish() {
+        let active: UnifiAlarmRecord = serde_json::from_str(
+            r#"{"key":"EVT_AP_Lost_Contact","msg":"AP ACProSalon was disconnected","time":1754400000000,"subsystem":"wlan"}"#,
+        )
+        .unwrap();
+        let summary = active.summarize().unwrap();
+        assert_eq!(summary.message, "AP ACProSalon was disconnected");
+        assert_eq!(summary.time, Some(1_754_400_000));
+
+        let archived: UnifiAlarmRecord =
+            serde_json::from_str(r#"{"msg":"old news","archived":true}"#).unwrap();
+        assert!(archived.summarize().is_none());
+
+        // No message at all falls back to the key rather than an empty entry.
+        let keyed: UnifiAlarmRecord =
+            serde_json::from_str(r#"{"key":"EVT_SOMETHING"}"#).unwrap();
+        assert_eq!(keyed.summarize().unwrap().message, "EVT_SOMETHING");
+    }
+
+    #[test]
+    fn a_foreign_ap_broadcasting_our_ssid_is_an_evil_twin() {
+        let records: Vec<UnifiRogueApRecord> = serde_json::from_value(serde_json::json!([
+            {"essid":"ADOFULL","bssid":"aa:aa:aa:aa:aa:01","signal":-88,"security":"open"},
+            {"essid":"NextDoorWifi","bssid":"bb:bb:bb:bb:bb:02","signal":-40}
+        ]))
+        .unwrap();
+        let own: std::collections::HashSet<String> = ["ADOFULL".to_string()].into();
+
+        let (summaries, total) = summarize_neighbor_aps(&records, &own, 30);
+        assert_eq!(total, 2);
+        assert!(summaries[0].evil_twin, "the twin sorts first despite weaker signal");
+        assert_eq!(summaries[0].ssid.as_deref(), Some("ADOFULL"));
+        assert!(!summaries[1].evil_twin);
+    }
+
+    #[test]
+    fn the_neighbor_cap_never_drops_an_evil_twin() {
+        let mut records: Vec<UnifiRogueApRecord> = (0..40)
+            .map(|i| UnifiRogueApRecord {
+                essid: Some(format!("neighbor-{i}")),
+                signal: Some(-30 - i),
+                ..Default::default()
+            })
+            .collect();
+        records.push(UnifiRogueApRecord {
+            essid: Some("ADOFULL".into()),
+            signal: Some(-90), // weakest of all — would be cut by strength alone
+            ..Default::default()
+        });
+        let own: std::collections::HashSet<String> = ["ADOFULL".to_string()].into();
+
+        let (summaries, total) = summarize_neighbor_aps(&records, &own, 30);
+        assert_eq!(total, 41);
+        assert_eq!(summaries.len(), 30, "cap holds");
+        assert!(summaries.iter().any(|s| s.evil_twin), "twin survived the cut");
     }
 
     #[test]

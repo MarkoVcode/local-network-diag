@@ -272,6 +272,25 @@ export interface UnifiNetworkSummary {
   dhcp?: boolean;
 }
 
+/** An active alarm, worded by the controller itself. */
+export interface UnifiAlarmSummary {
+  message: string;
+  subsystem?: string;
+  /** Epoch seconds. */
+  time?: number;
+}
+
+/** A foreign AP overheard by the site's own radios. */
+export interface NeighborApSummary {
+  ssid?: string;
+  bssid?: string;
+  channel?: number;
+  signalDbm?: number;
+  security?: string;
+  /** A foreign radio broadcasting one of this site's own SSIDs. */
+  evilTwin: boolean;
+}
+
 export interface UnifiSnapshot {
   controllerHost: string;
   site: string;
@@ -282,6 +301,12 @@ export interface UnifiSnapshot {
   wanTriage?: string;
   /** Networks as configured on the controller. Absent before 1.2. */
   networks?: UnifiNetworkSummary[];
+  /** Active alarms. Absent before 1.2. */
+  alarms?: UnifiAlarmSummary[];
+  /** Strongest overheard foreign APs (evil twins always included). */
+  neighborAps?: NeighborApSummary[];
+  /** Total overheard APs before the strongest-N cut. */
+  neighborApTotal?: number;
   warnings: string[];
 }
 
@@ -326,6 +351,16 @@ export interface WirelessHealthIssue {
   explanation: string;
 }
 
+/** A client the controller's event log shows repeatedly dropping off. */
+export interface FlappingClient {
+  mac: string;
+  name: string;
+  /** Disconnect events inside the event window (24 h). */
+  disconnects: number;
+  accessPoint?: string;
+  explanation: string;
+}
+
 /** A network the controller defines but no scan target covered. */
 export interface UnscannedNetwork {
   name: string;
@@ -355,6 +390,7 @@ export interface Reconciliation {
   wirelessIssues?: WirelessHealthIssue[];
   degradedLinks?: DegradedLink[];
   unscannedNetworks?: UnscannedNetwork[];
+  flappingClients?: FlappingClient[];
   summary: string;
 }
 

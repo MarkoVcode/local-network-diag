@@ -94,6 +94,8 @@ export function ReconciliationPanel({
   const wirelessIssues = reconciliation.wirelessIssues ?? [];
   const degradedLinks = reconciliation.degradedLinks ?? [];
   const unscannedNetworks = reconciliation.unscannedNetworks ?? [];
+  const flappingClients = reconciliation.flappingClients ?? [];
+  const alarms = unifi?.alarms ?? [];
   const clean =
     shadow.length === 0 &&
     missed.length === 0 &&
@@ -101,11 +103,38 @@ export function ReconciliationPanel({
     identityConflicts.length === 0 &&
     wirelessIssues.length === 0 &&
     degradedLinks.length === 0 &&
-    unscannedNetworks.length === 0;
+    unscannedNetworks.length === 0 &&
+    flappingClients.length === 0 &&
+    alarms.length === 0;
 
   return (
     <div className="space-y-4">
       {unifi && <SiteHealth unifi={unifi} />}
+
+      {alarms.length > 0 && (
+        <Card
+          title={`Controller alarms — ${alarms.length}`}
+          subtitle="Active alarms raised by the controller, verbatim"
+        >
+          <ul className="space-y-1.5">
+            {alarms.map((alarm, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm">
+                <span aria-hidden style={{ color: "var(--status-critical)" }}>
+                  ▲
+                </span>
+                <span style={{ color: "var(--text-secondary)" }}>
+                  {alarm.message}
+                  {alarm.time !== undefined && (
+                    <span className="ml-2 text-xs" style={{ color: "var(--text-muted)" }}>
+                      {new Date(alarm.time * 1000).toLocaleString()}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <Card title="Reconciliation" subtitle={reconciliation.summary}>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -343,6 +372,31 @@ export function ReconciliationPanel({
         </Card>
       )}
 
+      {flappingClients.length > 0 && (
+        <Card
+          title={`Unstable connections — ${flappingClients.length}`}
+          subtitle="Clients the controller's event log shows repeatedly dropping off"
+        >
+          <ul className="space-y-2">
+            {flappingClients.map((flap) => (
+              <li key={flap.mac} className="rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{flap.name}</span>
+                  <span className="font-mono text-[11px] tabular" style={{ color: "var(--text-muted)" }}>
+                    {flap.mac}
+                  </span>
+                  <StatusBadge tone="warning" label={`${flap.disconnects} drops / 24 h`} />
+                  {flap.accessPoint && <Pill>{flap.accessPoint}</Pill>}
+                </div>
+                <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                  {flap.explanation}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
       {degradedLinks.length > 0 && (
         <Card
           title={`Degraded links — ${degradedLinks.length}`}
@@ -468,6 +522,49 @@ export function ReconciliationPanel({
               </tbody>
             </table>
           </div>
+        </Card>
+      )}
+
+      {unifi && (unifi.neighborAps ?? []).length > 0 && (
+        <Card
+          title={`Nearby networks — ${
+            unifi.neighborApTotal && unifi.neighborApTotal > unifi.neighborAps!.length
+              ? `strongest ${unifi.neighborAps!.length} of ${unifi.neighborApTotal}`
+              : unifi.neighborAps!.length
+          }`}
+          subtitle="Foreign access points overheard by your own radios — something no host scan can see"
+        >
+          <ul className="space-y-1.5">
+            {unifi.neighborAps!.map((ap, i) => (
+              <li
+                key={i}
+                className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+                style={{
+                  borderColor: ap.evilTwin ? "var(--status-critical)" : "var(--border)",
+                }}
+              >
+                <span className="font-medium">{ap.ssid ?? "(hidden SSID)"}</span>
+                {ap.evilTwin && (
+                  <StatusBadge tone="critical" label="Broadcasts your SSID" />
+                )}
+                {ap.bssid && (
+                  <span className="font-mono text-[11px] tabular" style={{ color: "var(--text-muted)" }}>
+                    {ap.bssid}
+                  </span>
+                )}
+                {ap.channel !== undefined && <Pill mono>ch {ap.channel}</Pill>}
+                {ap.signalDbm !== undefined && <Pill mono>{ap.signalDbm} dBm</Pill>}
+                {ap.security && <Pill>{ap.security}</Pill>}
+                {ap.evilTwin && (
+                  <p className="w-full text-xs" style={{ color: "var(--text-secondary)" }}>
+                    A radio that is not one of your access points is broadcasting this site&apos;s
+                    SSID. That is the evil-twin signature — worth confirming it is not a
+                    neighbour&apos;s honest coincidence or your own second site.
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
     </div>

@@ -24,7 +24,14 @@ const ENDPOINTS: &[(&str, &str)] = &[
     ("stat/alluser", "known clients"),
     ("stat/health", "site health"),
     ("rest/networkconf", "configured networks"),
+    // Query strings ride along: `get_data` appends the endpoint verbatim.
+    ("stat/event?_limit=200&within=24", "recent events"),
+    ("list/alarm?archived=false", "active alarms"),
+    ("stat/rogueap?within=24", "nearby access points"),
 ];
+
+/// Keep only the strongest few neighbors; evil twins always survive the cut.
+const NEIGHBOR_AP_CAP: usize = 30;
 
 /// Signs in, fetches everything, signs out.
 ///
@@ -49,9 +56,13 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
         ));
     }
 
+    let mut raw_alarms: Vec<model::UnifiAlarmRecord> = Vec::new();
+    let mut raw_rogues: Vec<model::UnifiRogueApRecord> = Vec::new();
+
     for (endpoint, label) in ENDPOINTS {
         match client.get_data(&config.site, endpoint).await {
-            Ok(value) => match *endpoint {
+            // Matching on the path alone keeps query strings out of the arms.
+            Ok(value) => match endpoint.split('?').next().unwrap_or(endpoint) {
                 "stat/sta" => snapshot.clients = parse_list(value),
                 "stat/alluser" => snapshot.known_clients = parse_list(value),
                 "stat/device" => {
@@ -67,6 +78,9 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
                     let records: Vec<model::UnifiNetworkConf> = parse_list(value);
                     snapshot.networks = records.iter().map(Into::into).collect();
                 }
+                "stat/event" => snapshot.raw_events = parse_list(value),
+                "list/alarm" => raw_alarms = parse_list(value),
+                "stat/rogueap" => raw_rogues = parse_list(value),
                 _ => {}
             },
             Err(error) => {
@@ -88,6 +102,25 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
     client.logout().await;
 
     snapshot.wan_triage = model::wan_triage(&snapshot.health);
+    snapshot.alarms = raw_alarms
+        .iter()
+        .filter_map(model::UnifiAlarmRecord::summarize)
+        .collect();
+
+    // The evil-twin check compares overheard SSIDs against the ones this
+    // site's own clients associate to. Client records are the best available
+    // source of "our SSIDs" without fetching the WLAN configuration.
+    let own_ssids: std::collections::HashSet<String> = snapshot
+        .clients
+        .iter()
+        .chain(&snapshot.known_clients)
+        .filter_map(|client| client.essid.clone())
+        .filter(|ssid| !ssid.trim().is_empty())
+        .collect();
+    let (neighbors, total) =
+        model::summarize_neighbor_aps(&raw_rogues, &own_ssids, NEIGHBOR_AP_CAP);
+    snapshot.neighbor_aps = neighbors;
+    snapshot.neighbor_ap_total = total;
 
     // Losing every collection means the credentials work but the account can see
     // nothing — worth surfacing as an error rather than an empty success.

@@ -98,6 +98,19 @@ pub struct DegradedLink {
     pub explanation: String,
 }
 
+/// A client the controller's event log shows repeatedly dropping off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlappingClient {
+    pub mac: String,
+    pub name: String,
+    /// Disconnect events inside the event window (24 h).
+    pub disconnects: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_point: Option<String>,
+    pub explanation: String,
+}
+
 /// A network the controller defines but no scan target covered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +160,9 @@ pub struct Reconciliation {
     /// own blind spots, stated by name.
     #[serde(default)]
     pub unscanned_networks: Vec<UnscannedNetwork>,
+    /// Clients the controller's event log shows repeatedly disconnecting.
+    #[serde(default)]
+    pub flapping_clients: Vec<FlappingClient>,
     pub summary: String,
 }
 
@@ -167,6 +183,22 @@ pub fn apply(
     let by_mac = unifi.clients_by_mac();
     let device_names = unifi.device_names();
     let unscanned_networks = find_unscanned_networks(unifi, scanned_cidrs);
+
+    // Disconnect timestamps (epoch seconds) per client MAC, newest first.
+    let mut disconnects_by_mac: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
+    for event in &unifi.raw_events {
+        if !event.is_disconnect() {
+            continue;
+        }
+        let (Some(mac), Some(time)) = (event.client_mac(), event.time_seconds()) else {
+            continue;
+        };
+        disconnects_by_mac.entry(mac.to_string()).or_default().push(time);
+    }
+    for times in disconnects_by_mac.values_mut() {
+        times.sort_unstable_by(|a, b| b.cmp(a));
+    }
 
     // Configured VLAN id -> network name, to name a client whose record
     // carries only the number.
@@ -365,12 +397,24 @@ pub fn apply(
                 )
             });
 
+        // Failing that, the event log may explain the absence directly.
+        let recent_drop = disconnects_by_mac
+            .get(mac)
+            .and_then(|times| times.first())
+            .map(|last| {
+                format!(
+                    "The controller lists it as a client, but also logged it disconnecting {} \
+                     ago — it was likely offline when the scan probed it.",
+                    human_ago(now.saturating_sub(*last))
+                )
+            });
+
         missed.push(MissedDevice {
             mac: mac.clone(),
             name: record.best_name().unwrap_or_else(|| mac.clone()),
             ip,
             location,
-            explanation: blind_spot.unwrap_or_else(|| {
+            explanation: blind_spot.or(recent_drop).unwrap_or_else(|| {
                 "The controller shows this connected, but the scan did not reach it. Usually a \
                  sleeping device, one that ignores probes, or one on a network this machine \
                  cannot route to."
@@ -378,6 +422,34 @@ pub fn apply(
             }),
         });
     }
+
+    // Repeated disconnects are a finding on their own, reached or not: the
+    // scan sees a device that answers, the log sees one that keeps falling off.
+    let mut flapping_clients: Vec<FlappingClient> = disconnects_by_mac
+        .iter()
+        .filter(|(_, times)| times.len() >= 3)
+        .map(|(mac, times)| {
+            let record = by_mac.get(mac.as_str()).copied();
+            let access_point = record
+                .and_then(|r| r.ap_mac.clone())
+                .map(|ap| device_names.get(&ap).cloned().unwrap_or(ap));
+            FlappingClient {
+                name: record
+                    .and_then(|r| r.best_name())
+                    .unwrap_or_else(|| mac.clone()),
+                mac: mac.clone(),
+                disconnects: times.len(),
+                access_point,
+                explanation: format!(
+                    "The controller logged {} disconnects for this client in the last 24 hours. \
+                     A connection dropping this often usually means weak signal, interference, \
+                     or flaky power on the device itself.",
+                    times.len()
+                ),
+            }
+        })
+        .collect();
+    flapping_clients.sort_by_key(|flap| std::cmp::Reverse(flap.disconnects));
 
     let hidden_segments: Vec<HiddenSegment> = unifi
         .crowded_ports()
@@ -413,17 +485,7 @@ pub fn apply(
         })
         .collect();
 
-    let summary = build_summary(
-        matched,
-        &shadow,
-        &missed,
-        &hidden_segments,
-        &wireless_issues,
-        &degraded_links,
-        &unscanned_networks,
-    );
-
-    Reconciliation {
+    let mut reconciliation = Reconciliation {
         matched,
         shadow,
         missed,
@@ -432,7 +494,21 @@ pub fn apply(
         wireless_issues,
         degraded_links,
         unscanned_networks,
-        summary,
+        flapping_clients,
+        summary: String::new(),
+    };
+    reconciliation.summary = reconciliation.build_summary();
+    reconciliation
+}
+
+fn human_ago(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 3_600 {
+        format!("{} minute(s)", (seconds / 60).max(1))
+    } else if seconds < 86_400 {
+        format!("{} hour(s)", seconds / 3_600)
+    } else {
+        format!("{} day(s)", seconds / 86_400)
     }
 }
 
@@ -592,45 +668,50 @@ fn detect_identity_conflict(device: &Device, fingerprint: Option<&str>) -> Optio
     None
 }
 
-fn build_summary(
-    matched: usize,
-    shadow: &[ShadowDevice],
-    missed: &[MissedDevice],
-    hidden: &[HiddenSegment],
-    wireless: &[WirelessHealthIssue],
-    degraded: &[DegradedLink],
-    unscanned: &[UnscannedNetwork],
-) -> String {
-    if shadow.is_empty()
-        && missed.is_empty()
-        && hidden.is_empty()
-        && wireless.is_empty()
-        && degraded.is_empty()
-        && unscanned.is_empty()
-    {
-        return format!("All {matched} devices are accounted for by the controller.");
-    }
+impl Reconciliation {
+    fn build_summary(&self) -> String {
+        let matched = self.matched;
+        if self.shadow.is_empty()
+            && self.missed.is_empty()
+            && self.hidden_segments.is_empty()
+            && self.wireless_issues.is_empty()
+            && self.degraded_links.is_empty()
+            && self.unscanned_networks.is_empty()
+            && self.flapping_clients.is_empty()
+        {
+            return format!("All {matched} devices are accounted for by the controller.");
+        }
 
-    let mut parts = vec![format!("{matched} accounted for")];
-    if !shadow.is_empty() {
-        parts.push(format!("{} unknown to the controller", shadow.len()));
+        let mut parts = vec![format!("{matched} accounted for")];
+        if !self.shadow.is_empty() {
+            parts.push(format!("{} unknown to the controller", self.shadow.len()));
+        }
+        if !self.missed.is_empty() {
+            parts.push(format!("{} the scan did not reach", self.missed.len()));
+        }
+        if !self.hidden_segments.is_empty() {
+            parts.push(format!(
+                "{} port(s) hiding other devices",
+                self.hidden_segments.len()
+            ));
+        }
+        if !self.wireless_issues.is_empty() {
+            parts.push(format!("{} struggling on Wi-Fi", self.wireless_issues.len()));
+        }
+        if !self.degraded_links.is_empty() {
+            parts.push(format!("{} degraded link(s)", self.degraded_links.len()));
+        }
+        if !self.unscanned_networks.is_empty() {
+            parts.push(format!(
+                "{} network(s) never scanned",
+                self.unscanned_networks.len()
+            ));
+        }
+        if !self.flapping_clients.is_empty() {
+            parts.push(format!("{} client(s) flapping", self.flapping_clients.len()));
+        }
+        parts.join(", ")
     }
-    if !missed.is_empty() {
-        parts.push(format!("{} the scan did not reach", missed.len()));
-    }
-    if !hidden.is_empty() {
-        parts.push(format!("{} port(s) hiding other devices", hidden.len()));
-    }
-    if !wireless.is_empty() {
-        parts.push(format!("{} struggling on Wi-Fi", wireless.len()));
-    }
-    if !degraded.is_empty() {
-        parts.push(format!("{} degraded link(s)", degraded.len()));
-    }
-    if !unscanned.is_empty() {
-        parts.push(format!("{} network(s) never scanned", unscanned.len()));
-    }
-    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -1142,6 +1223,75 @@ mod tests {
         apply(&mut devices, &unifi, &["10.0.30.0/24".to_string()]);
 
         assert_eq!(devices[0].unifi_network.as_deref(), Some("IoT"));
+    }
+
+    fn disconnect_event(mac: &str, seconds_ago: i64) -> crate::unifi::model::UnifiEventRecord {
+        crate::unifi::model::UnifiEventRecord {
+            key: Some("EVT_WU_Disconnected".into()),
+            user: Some(mac.into()),
+            time: Some((chrono::Utc::now().timestamp() - seconds_ago) * 1000),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_missed_device_with_a_recent_disconnect_gets_the_event_explanation() {
+        let mut record = client("aa:aa:aa:aa:aa:aa", "Tablet");
+        record.ip = Some("10.0.3.90".into());
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            raw_events: vec![disconnect_event("aa:aa:aa:aa:aa:aa", 25 * 60)],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &[]);
+
+        assert_eq!(result.missed.len(), 1);
+        assert!(
+            result.missed[0].explanation.contains("logged it disconnecting"),
+            "guess must upgrade to the logged fact: {}",
+            result.missed[0].explanation
+        );
+        assert!(result.missed[0].explanation.contains("25 minute(s)"));
+    }
+
+    #[test]
+    fn the_blind_spot_explanation_outranks_the_event_one() {
+        // Being on an unscanned network explains more than a disconnect does.
+        let mut record = client("aa:aa:aa:aa:aa:aa", "Camera");
+        record.ip = Some("10.0.30.42".into());
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            networks: vec![network("IoT", "10.0.30.0/24", Some(30))],
+            raw_events: vec![disconnect_event("aa:aa:aa:aa:aa:aa", 600)],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &["10.0.3.0/24".to_string()]);
+        assert!(result.missed[0].explanation.contains("\"IoT\""));
+    }
+
+    #[test]
+    fn three_disconnects_in_a_day_is_flapping_two_is_not() {
+        let unifi = UnifiSnapshot {
+            clients: vec![client("aa:aa:aa:aa:aa:01", "Doorbell")],
+            raw_events: vec![
+                disconnect_event("aa:aa:aa:aa:aa:01", 3_600),
+                disconnect_event("aa:aa:aa:aa:aa:01", 7_200),
+                disconnect_event("aa:aa:aa:aa:aa:01", 10_800),
+                disconnect_event("bb:bb:bb:bb:bb:02", 3_600),
+                disconnect_event("bb:bb:bb:bb:bb:02", 7_200),
+            ],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi, &[]);
+
+        assert_eq!(result.flapping_clients.len(), 1);
+        let flap = &result.flapping_clients[0];
+        assert_eq!(flap.name, "Doorbell", "named via the client record");
+        assert_eq!(flap.disconnects, 3);
+        assert!(flap.explanation.contains("3 disconnects"));
+        assert!(result.summary.contains("flapping"));
     }
 
     #[test]

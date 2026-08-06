@@ -127,7 +127,7 @@ and the scanner reports its own blind spots.
 
 ---
 
-## WP4 — Events, alarms and rogue APs (`stat/event`, `list/alarm`, `stat/rogueap`)
+## WP4 — Events, alarms and rogue APs (`stat/event`, `list/alarm`, `stat/rogueap`) ✅ (implemented)
 
 - **Endpoints** (all GET; note `get_data` appends the endpoint verbatim, so
   query strings ride along):
