@@ -457,7 +457,12 @@ pub fn summarize_neighbor_aps(
 
     let total = summaries.len();
     // Evil twins first, then strongest signal — the order of interest.
-    summaries.sort_by_key(|s| (!s.evil_twin, std::cmp::Reverse(s.signal_dbm.unwrap_or(i32::MIN))));
+    summaries.sort_by_key(|s| {
+        (
+            !s.evil_twin,
+            std::cmp::Reverse(s.signal_dbm.unwrap_or(i32::MIN)),
+        )
+    });
     summaries.truncate(cap.max(summaries.iter().filter(|s| s.evil_twin).count()));
     (summaries, total)
 }
@@ -910,16 +915,25 @@ mod tests {
 
     #[test]
     fn event_times_normalize_from_milliseconds() {
-        let event: UnifiEventRecord =
-            serde_json::from_str(r#"{"key":"EVT_WU_Disconnected","time":1754400000000,"user":"AA-BB-CC-DD-EE-FF"}"#)
-                .unwrap();
+        let event: UnifiEventRecord = serde_json::from_str(
+            r#"{"key":"EVT_WU_Disconnected","time":1754400000000,"user":"AA-BB-CC-DD-EE-FF"}"#,
+        )
+        .unwrap();
         assert_eq!(event.time_seconds(), Some(1_754_400_000));
         assert!(event.is_disconnect());
-        assert_eq!(event.client_mac(), Some("aa:bb:cc:dd:ee:ff"), "MAC normalized");
+        assert_eq!(
+            event.client_mac(),
+            Some("aa:bb:cc:dd:ee:ff"),
+            "MAC normalized"
+        );
 
         let seconds: UnifiEventRecord =
             serde_json::from_str(r#"{"key":"EVT_WU_Connected","time":1754400000}"#).unwrap();
-        assert_eq!(seconds.time_seconds(), Some(1_754_400_000), "already-seconds passes through");
+        assert_eq!(
+            seconds.time_seconds(),
+            Some(1_754_400_000),
+            "already-seconds passes through"
+        );
         assert!(!seconds.is_disconnect());
     }
 
@@ -946,8 +960,7 @@ mod tests {
         assert!(archived.summarize().is_none());
 
         // No message at all falls back to the key rather than an empty entry.
-        let keyed: UnifiAlarmRecord =
-            serde_json::from_str(r#"{"key":"EVT_SOMETHING"}"#).unwrap();
+        let keyed: UnifiAlarmRecord = serde_json::from_str(r#"{"key":"EVT_SOMETHING"}"#).unwrap();
         assert_eq!(keyed.summarize().unwrap().message, "EVT_SOMETHING");
     }
 
@@ -962,7 +975,10 @@ mod tests {
 
         let (summaries, total) = summarize_neighbor_aps(&records, &own, 30);
         assert_eq!(total, 2);
-        assert!(summaries[0].evil_twin, "the twin sorts first despite weaker signal");
+        assert!(
+            summaries[0].evil_twin,
+            "the twin sorts first despite weaker signal"
+        );
         assert_eq!(summaries[0].ssid.as_deref(), Some("ADOFULL"));
         assert!(!summaries[1].evil_twin);
     }
@@ -986,7 +1002,10 @@ mod tests {
         let (summaries, total) = summarize_neighbor_aps(&records, &own, 30);
         assert_eq!(total, 41);
         assert_eq!(summaries.len(), 30, "cap holds");
-        assert!(summaries.iter().any(|s| s.evil_twin), "twin survived the cut");
+        assert!(
+            summaries.iter().any(|s| s.evil_twin),
+            "twin survived the cut"
+        );
     }
 
     #[test]
@@ -1058,7 +1077,10 @@ mod tests {
         let verdict = wan_triage(&[health("wan", "ok"), www]).unwrap();
 
         assert!(verdict.contains("healthy"));
-        assert!(verdict.contains("12 ms"), "latency is rounded in: {verdict}");
+        assert!(
+            verdict.contains("12 ms"),
+            "latency is rounded in: {verdict}"
+        );
         assert!(verdict.contains("local network"));
     }
 
@@ -1079,7 +1101,11 @@ mod tests {
         // False reassurance is worse than silence.
         assert_eq!(wan_triage(&[]), None);
         assert_eq!(wan_triage(&[health("www", "unknown")]), None);
-        assert_eq!(wan_triage(&[health("lan", "ok")]), None, "LAN says nothing about WAN");
+        assert_eq!(
+            wan_triage(&[health("lan", "ok")]),
+            None,
+            "LAN says nothing about WAN"
+        );
     }
 
     #[test]
@@ -1099,11 +1125,13 @@ mod tests {
 
     #[test]
     fn radio_protocols_map_to_wifi_generations() {
-        let gen = |proto: &str| UnifiClientRecord {
-            radio_proto: Some(proto.into()),
-            ..Default::default()
-        }
-        .wifi_generation();
+        let gen = |proto: &str| {
+            UnifiClientRecord {
+                radio_proto: Some(proto.into()),
+                ..Default::default()
+            }
+            .wifi_generation()
+        };
 
         assert_eq!(gen("ax").as_deref(), Some("Wi-Fi 6 (ax)"));
         assert_eq!(gen("ac").as_deref(), Some("Wi-Fi 5 (ac)"));
@@ -1142,7 +1170,10 @@ mod tests {
             device(6, true).state_problem().as_deref(),
             Some("Heartbeat missed")
         );
-        assert_eq!(device(0, true).state_problem().as_deref(), Some("Disconnected"));
+        assert_eq!(
+            device(0, true).state_problem().as_deref(),
+            Some("Disconnected")
+        );
         assert_eq!(
             device(42, true).state_problem().as_deref(),
             Some("State 42"),

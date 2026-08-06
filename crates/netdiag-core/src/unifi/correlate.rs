@@ -194,7 +194,10 @@ pub fn apply(
         let (Some(mac), Some(time)) = (event.client_mac(), event.time_seconds()) else {
             continue;
         };
-        disconnects_by_mac.entry(mac.to_string()).or_default().push(time);
+        disconnects_by_mac
+            .entry(mac.to_string())
+            .or_default()
+            .push(time);
     }
     for times in disconnects_by_mac.values_mut() {
         times.sort_unstable_by(|a, b| b.cmp(a));
@@ -535,7 +538,11 @@ fn find_unscanned_networks(
         }
         if matches!(
             network.purpose.as_deref(),
-            Some("wan") | Some("wan2") | Some("vpn-client") | Some("site-vpn") | Some("remote-user-vpn")
+            Some("wan")
+                | Some("wan2")
+                | Some("vpn-client")
+                | Some("site-vpn")
+                | Some("remote-user-vpn")
         ) {
             continue;
         }
@@ -696,7 +703,10 @@ impl Reconciliation {
             ));
         }
         if !self.wireless_issues.is_empty() {
-            parts.push(format!("{} struggling on Wi-Fi", self.wireless_issues.len()));
+            parts.push(format!(
+                "{} struggling on Wi-Fi",
+                self.wireless_issues.len()
+            ));
         }
         if !self.degraded_links.is_empty() {
             parts.push(format!("{} degraded link(s)", self.degraded_links.len()));
@@ -708,7 +718,10 @@ impl Reconciliation {
             ));
         }
         if !self.flapping_clients.is_empty() {
-            parts.push(format!("{} client(s) flapping", self.flapping_clients.len()));
+            parts.push(format!(
+                "{} client(s) flapping",
+                self.flapping_clients.len()
+            ));
         }
         parts.join(", ")
     }
@@ -1128,7 +1141,11 @@ mod tests {
         assert!(result.summary.contains("degraded link"));
     }
 
-    fn network(name: &str, subnet: &str, vlan: Option<u32>) -> crate::unifi::model::UnifiNetworkSummary {
+    fn network(
+        name: &str,
+        subnet: &str,
+        vlan: Option<u32>,
+    ) -> crate::unifi::model::UnifiNetworkSummary {
         crate::unifi::model::UnifiNetworkSummary {
             name: name.into(),
             purpose: Some("corporate".into()),
@@ -1205,7 +1222,9 @@ mod tests {
             "the guess must upgrade to a named network: {}",
             result.missed[0].explanation
         );
-        assert!(result.missed[0].explanation.contains("expected, not a fault"));
+        assert!(result.missed[0]
+            .explanation
+            .contains("expected, not a fault"));
     }
 
     #[test]
@@ -1248,7 +1267,9 @@ mod tests {
 
         assert_eq!(result.missed.len(), 1);
         assert!(
-            result.missed[0].explanation.contains("logged it disconnecting"),
+            result.missed[0]
+                .explanation
+                .contains("logged it disconnecting"),
             "guess must upgrade to the logged fact: {}",
             result.missed[0].explanation
         );
