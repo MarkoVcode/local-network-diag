@@ -235,6 +235,133 @@ impl UnifiDeviceRecord {
     }
 }
 
+/// One entry from `stat/health` — the controller's own verdict on a subsystem
+/// (`wan`, `www`, `lan`, `wlan`, `vpn`).
+///
+/// `www` is the controller's *measured* view of internet reachability (it
+/// probes an external target), while `wan` is the state of the uplink port.
+/// Both matter: a WAN port can be up while the internet behind it is not.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct UnifiHealthRecord {
+    pub subsystem: Option<String>,
+    pub status: Option<String>,
+    pub wan_ip: Option<String>,
+    pub gw_name: Option<String>,
+    pub lan_ip: Option<String>,
+    /// Milliseconds to the controller's external probe target.
+    pub latency: Option<f64>,
+    pub uptime: Option<i64>,
+    /// Measured throughput in Mbps, when the controller runs an uplink monitor.
+    pub xput_up: Option<f64>,
+    pub xput_down: Option<f64>,
+    pub speedtest_ping: Option<f64>,
+    pub drops: Option<i64>,
+    pub num_user: Option<i64>,
+    pub num_guest: Option<i64>,
+    pub num_ap: Option<i64>,
+    pub num_sw: Option<i64>,
+    pub num_adopted: Option<i64>,
+    pub num_disconnected: Option<i64>,
+}
+
+/// The health entry as stored in a snapshot, for the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiHealthSummary {
+    pub subsystem: String,
+    /// `ok`, `warning`, `error` or `unknown`, as the controller reports it.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xput_up_mbps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xput_down_mbps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drops: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clients: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guests: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disconnected: Option<i64>,
+}
+
+impl From<&UnifiHealthRecord> for UnifiHealthSummary {
+    fn from(record: &UnifiHealthRecord) -> Self {
+        Self {
+            subsystem: record.subsystem.clone().unwrap_or_default(),
+            status: record
+                .status
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            wan_ip: record.wan_ip.clone(),
+            gateway_name: record.gw_name.clone(),
+            latency_ms: record.latency.or(record.speedtest_ping),
+            xput_up_mbps: record.xput_up,
+            xput_down_mbps: record.xput_down,
+            drops: record.drops,
+            clients: record.num_user,
+            guests: record.num_guest,
+            adopted: record.num_adopted,
+            disconnected: record.num_disconnected,
+        }
+    }
+}
+
+/// The one sentence a home user actually wants: is the problem my LAN or my
+/// internet? Answered from the controller's own health verdicts, so it works
+/// even when this machine's own WAN probes are blocked.
+///
+/// Returns `None` when the controller offers nothing conclusive — an absent
+/// or `unknown` internet subsystem must not produce false reassurance.
+pub fn wan_triage(health: &[UnifiHealthSummary]) -> Option<String> {
+    let find = |name: &str| health.iter().find(|h| h.subsystem == name);
+    let www = find("www");
+    let wan = find("wan");
+
+    // Prefer the measured internet check; fall back to the uplink port state.
+    let verdict = www.filter(|h| h.status != "unknown").or(wan)?;
+    let latency = www.and_then(|h| h.latency_ms);
+
+    match verdict.status.as_str() {
+        "ok" => {
+            let mut sentence = String::from("The controller reports the internet link healthy");
+            if let Some(ms) = latency {
+                sentence.push_str(&format!(" ({ms:.0} ms to its external probe)"));
+            }
+            sentence.push_str(" — if something feels slow, the cause is on the local network.");
+            Some(sentence)
+        }
+        "warning" | "error" => {
+            let mut details = Vec::new();
+            if let Some(ms) = latency {
+                details.push(format!("latency {ms:.0} ms"));
+            }
+            if let Some(drops) = www.and_then(|h| h.drops).filter(|d| *d > 0) {
+                details.push(format!("{drops} dropped probe(s)"));
+            }
+            let detail = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join(", "))
+            };
+            Some(format!(
+                "The controller reports trouble on the internet link{detail} — slowness is \
+                 likely upstream, not on your LAN."
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Everything fetched from the controller in one pass.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,6 +370,12 @@ pub struct UnifiSnapshot {
     pub site: String,
     /// Managed infrastructure, keyed for display.
     pub devices: Vec<UnifiDeviceSummary>,
+    /// Per-subsystem health verdicts. Defaulted so pre-1.2 snapshots load.
+    #[serde(default)]
+    pub health: Vec<UnifiHealthSummary>,
+    /// The LAN-or-internet triage sentence derived from `health`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wan_triage: Option<String>,
     /// Non-fatal problems — an endpoint this account cannot read, say.
     pub warnings: Vec<String>,
     #[serde(skip, default)]
@@ -529,6 +662,75 @@ mod tests {
             Some("10.0.3.50"),
             "the historical record's stale IP must not win"
         );
+    }
+
+    fn health(subsystem: &str, status: &str) -> UnifiHealthSummary {
+        UnifiHealthSummary::from(&UnifiHealthRecord {
+            subsystem: Some(subsystem.into()),
+            status: Some(status.into()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn parses_a_health_record_from_controller_json() {
+        let record: UnifiHealthRecord = serde_json::from_str(
+            r#"{"subsystem":"www","status":"ok","latency":12.0,"xput_up":48.2,
+                "xput_down":940.1,"drops":0,"uptime":86400,"unknown_field":true}"#,
+        )
+        .unwrap();
+        let summary = UnifiHealthSummary::from(&record);
+
+        assert_eq!(summary.subsystem, "www");
+        assert_eq!(summary.status, "ok");
+        assert_eq!(summary.latency_ms, Some(12.0));
+        assert_eq!(summary.xput_down_mbps, Some(940.1));
+    }
+
+    #[test]
+    fn a_healthy_internet_link_points_the_finger_at_the_lan() {
+        let mut www = health("www", "ok");
+        www.latency_ms = Some(11.6);
+        let verdict = wan_triage(&[health("wan", "ok"), www]).unwrap();
+
+        assert!(verdict.contains("healthy"));
+        assert!(verdict.contains("12 ms"), "latency is rounded in: {verdict}");
+        assert!(verdict.contains("local network"));
+    }
+
+    #[test]
+    fn a_broken_internet_link_points_upstream() {
+        let mut www = health("www", "error");
+        www.latency_ms = Some(340.0);
+        www.drops = Some(7);
+        let verdict = wan_triage(&[www]).unwrap();
+
+        assert!(verdict.contains("upstream"));
+        assert!(verdict.contains("340 ms"));
+        assert!(verdict.contains("7 dropped"));
+    }
+
+    #[test]
+    fn no_conclusive_health_produces_no_verdict() {
+        // False reassurance is worse than silence.
+        assert_eq!(wan_triage(&[]), None);
+        assert_eq!(wan_triage(&[health("www", "unknown")]), None);
+        assert_eq!(wan_triage(&[health("lan", "ok")]), None, "LAN says nothing about WAN");
+    }
+
+    #[test]
+    fn an_unknown_www_falls_back_to_the_wan_port_state() {
+        // Uplink port down, measured check unavailable: still conclusive.
+        let verdict = wan_triage(&[health("www", "unknown"), health("wan", "error")]).unwrap();
+        assert!(verdict.contains("upstream"));
+    }
+
+    #[test]
+    fn pre_health_snapshots_still_deserialize() {
+        let old = r#"{"controllerHost":"10.0.3.12","site":"default","devices":[],"warnings":[]}"#;
+        let snapshot: UnifiSnapshot = serde_json::from_str(old).unwrap();
+        assert!(snapshot.health.is_empty());
+        assert!(snapshot.wan_triage.is_none());
     }
 
     #[test]

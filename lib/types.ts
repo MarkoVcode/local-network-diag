@@ -243,10 +243,31 @@ export interface UnifiPortSummary {
   poeWatts?: number;
 }
 
+/** One `stat/health` subsystem verdict (wan, www, lan, wlan, vpn). */
+export interface UnifiHealthSummary {
+  subsystem: string;
+  /** `ok`, `warning`, `error` or `unknown`, as the controller reports it. */
+  status: string;
+  wanIp?: string;
+  gatewayName?: string;
+  latencyMs?: number;
+  xputUpMbps?: number;
+  xputDownMbps?: number;
+  drops?: number;
+  clients?: number;
+  guests?: number;
+  adopted?: number;
+  disconnected?: number;
+}
+
 export interface UnifiSnapshot {
   controllerHost: string;
   site: string;
   devices: UnifiDeviceSummary[];
+  /** Absent on snapshots stored before 1.2. */
+  health?: UnifiHealthSummary[];
+  /** The LAN-or-internet triage sentence derived from health. */
+  wanTriage?: string;
   warnings: string[];
 }
 

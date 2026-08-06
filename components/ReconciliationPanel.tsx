@@ -9,6 +9,61 @@ function formatSpeed(mbps?: number): string {
   return mbps >= 1000 ? `${mbps / 1000} Gbps` : `${mbps} Mbps`;
 }
 
+const SUBSYSTEM_LABELS: Record<string, string> = {
+  wan: "WAN",
+  www: "Internet",
+  lan: "LAN",
+  wlan: "Wi-Fi",
+  vpn: "VPN",
+};
+
+function healthTone(status: string): "good" | "warning" | "critical" {
+  if (status === "ok") return "good";
+  if (status === "warning") return "warning";
+  return "critical";
+}
+
+/** The controller's own per-subsystem verdicts, plus the LAN-vs-internet triage. */
+function SiteHealth({ unifi }: { unifi: UnifiSnapshot }) {
+  // "unknown" subsystems (usually an unconfigured VPN) are noise, not status.
+  const health = (unifi.health ?? []).filter((h) => h.status !== "unknown");
+  if (health.length === 0 && !unifi.wanTriage) return null;
+
+  return (
+    <Card title="Site health" subtitle="As reported by the controller itself">
+      {health.length > 0 && (
+        <div className="flex flex-wrap gap-3">
+          {health.map((h) => (
+            <div
+              key={h.subsystem}
+              className="flex items-center gap-2 rounded-lg border px-3 py-2"
+              style={{ borderColor: "var(--border)" }}
+            >
+              <span className="text-sm font-medium">
+                {SUBSYSTEM_LABELS[h.subsystem] ?? h.subsystem}
+              </span>
+              <StatusBadge tone={healthTone(h.status)} label={h.status} />
+              {h.latencyMs !== undefined && <Pill mono>{Math.round(h.latencyMs)} ms</Pill>}
+              {h.wanIp && <Pill mono>{h.wanIp}</Pill>}
+              {h.clients !== undefined && (
+                <Pill>{h.clients + (h.guests ?? 0)} clients</Pill>
+              )}
+              {h.disconnected !== undefined && h.disconnected > 0 && (
+                <StatusBadge tone="warning" label={`${h.disconnected} device(s) down`} />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {unifi.wanTriage && (
+        <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+          {unifi.wanTriage}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 /**
  * Where the scan and the controller disagree.
  *
@@ -48,6 +103,8 @@ export function ReconciliationPanel({
 
   return (
     <div className="space-y-4">
+      {unifi && <SiteHealth unifi={unifi} />}
+
       <Card title="Reconciliation" subtitle={reconciliation.summary}>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[

@@ -71,7 +71,7 @@ tests — satisfaction thresholds, speed-mismatch detection, numeric-vs-string
 
 ---
 
-## WP2 — Site health: "is it my LAN or my internet?" (`stat/health`)
+## WP2 — Site health: "is it my LAN or my internet?" (`stat/health`) ✅ (implemented)
 
 - **Endpoint**: add `("stat/health", "site health")` to the `ENDPOINTS` table.
 - **Model**: `HealthSubsystem { subsystem, status, wan_ip, latency, xput_up,

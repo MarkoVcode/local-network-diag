@@ -17,11 +17,12 @@ pub use client::{Established, Flavour, UnifiClient, UnifiError};
 pub use config::UnifiConfig;
 pub use model::{UnifiClientRecord, UnifiDeviceRecord, UnifiSnapshot};
 
-/// Endpoints fetched in a Phase 1 pass, with the label used if one fails.
+/// Endpoints fetched in one pass, with the label used if one fails.
 const ENDPOINTS: &[(&str, &str)] = &[
     ("stat/sta", "active clients"),
     ("stat/device", "managed devices"),
     ("stat/alluser", "known clients"),
+    ("stat/health", "site health"),
 ];
 
 /// Signs in, fetches everything, signs out.
@@ -57,6 +58,10 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
                     snapshot.devices = devices.iter().map(Into::into).collect();
                     snapshot.raw_devices = devices;
                 }
+                "stat/health" => {
+                    let records: Vec<model::UnifiHealthRecord> = parse_list(value);
+                    snapshot.health = records.iter().map(Into::into).collect();
+                }
                 _ => {}
             },
             Err(error) => snapshot
@@ -67,11 +72,14 @@ pub async fn fetch(config: &UnifiConfig, password: &str) -> Result<UnifiSnapshot
 
     client.logout().await;
 
+    snapshot.wan_triage = model::wan_triage(&snapshot.health);
+
     // Losing every collection means the credentials work but the account can see
     // nothing — worth surfacing as an error rather than an empty success.
     if snapshot.clients.is_empty()
         && snapshot.known_clients.is_empty()
         && snapshot.raw_devices.is_empty()
+        && snapshot.health.is_empty()
         && !snapshot.warnings.is_empty()
     {
         return Err(UnifiError::Forbidden);
