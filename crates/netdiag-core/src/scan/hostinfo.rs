@@ -30,6 +30,51 @@ fn mask_to_prefix(mask: Ipv4Addr) -> u8 {
 
 pub async fn collect(extra_ranges: &[String]) -> (HostInfo, Vec<String>) {
     let mut warnings = Vec::new();
+    let mut interfaces = enumerate_interfaces();
+
+    let (gateway, routes) = platform::default_gateway().await;
+    let dns = platform::dns_servers().await;
+
+    // Attach MACs from the neighbour tooling's view of our own interfaces where
+    // possible; a host never ARPs for itself, so this comes from the OS listing.
+    attach_local_macs(&mut interfaces);
+
+    let gateway_dev = gateway.as_ref().map(|g| g.dev.clone()).unwrap_or_default();
+    classify(&mut interfaces, &gateway_dev, &mut warnings);
+
+    let scan_targets = build_targets(&interfaces, extra_ranges, &mut warnings);
+
+    let host = HostInfo {
+        hostname: hostname(),
+        platform: format!("{} {}", platform::os_label(), std::env::consts::ARCH),
+        os: platform::os_label(),
+        arch: std::env::consts::ARCH.to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        interfaces,
+        routes,
+        gateway,
+        dns,
+        scan_targets,
+    };
+
+    (host, warnings)
+}
+
+/// The ranges a scan started right now would sweep.
+///
+/// Cheap on purpose — interface enumeration only, no gateway, DNS or neighbour
+/// probes — so the UI can call it whenever its inputs change to show what
+/// "Run scan" will actually do before it is pressed.
+pub fn preview_targets(extra_ranges: &[String]) -> Vec<ScanTarget> {
+    let mut warnings = Vec::new();
+    let mut interfaces = enumerate_interfaces();
+    // No gateway lookup here: it only sets `is_primary`, which the target
+    // list does not depend on.
+    classify(&mut interfaces, "", &mut warnings);
+    build_targets(&interfaces, extra_ranges, &mut warnings)
+}
+
+fn enumerate_interfaces() -> Vec<InterfaceInfo> {
     let mut interfaces: Vec<InterfaceInfo> = Vec::new();
 
     let addrs = if_addrs::get_if_addrs().unwrap_or_default();
@@ -83,32 +128,7 @@ pub async fn collect(extra_ranges: &[String]) -> (HostInfo, Vec<String>) {
         }
     }
 
-    let (gateway, routes) = platform::default_gateway().await;
-    let dns = platform::dns_servers().await;
-
-    // Attach MACs from the neighbour tooling's view of our own interfaces where
-    // possible; a host never ARPs for itself, so this comes from the OS listing.
-    attach_local_macs(&mut interfaces);
-
-    let gateway_dev = gateway.as_ref().map(|g| g.dev.clone()).unwrap_or_default();
-    classify(&mut interfaces, &gateway_dev, &mut warnings);
-
-    let scan_targets = build_targets(&interfaces, extra_ranges, &mut warnings);
-
-    let host = HostInfo {
-        hostname: hostname(),
-        platform: format!("{} {}", platform::os_label(), std::env::consts::ARCH),
-        os: platform::os_label(),
-        arch: std::env::consts::ARCH.to_string(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        interfaces,
-        routes,
-        gateway,
-        dns,
-        scan_targets,
-    };
-
-    (host, warnings)
+    interfaces
 }
 
 #[cfg(target_os = "linux")]

@@ -152,6 +152,18 @@ impl Store {
         out
     }
 
+    /// Deletes every stored snapshot, returning how many were removed. The
+    /// directory itself survives, so the next scan writes normally.
+    pub async fn clear(&self) -> usize {
+        let mut removed = 0;
+        for id in self.list_ids().await {
+            if self.delete(&id).await {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     pub async fn delete(&self, id: &str) -> bool {
         if !Self::is_valid_id(id) {
             return false;

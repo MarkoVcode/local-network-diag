@@ -26,6 +26,7 @@ export function NetworksPanel({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
 
   const run = async (action: () => Promise<unknown>) => {
@@ -40,6 +41,7 @@ export function NetworksPanel({
       setBusy(false);
       setRenaming(null);
       setConfirmDelete(null);
+      setConfirmClear(null);
     }
   };
 
@@ -172,6 +174,17 @@ export function NetworksPanel({
                       >
                         Rename
                       </button>
+                      {network.scanCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmClear(network.id)}
+                          disabled={busy}
+                          className="text-xs hover:underline"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          Clear history
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setConfirmDelete(network.id)}
@@ -183,6 +196,33 @@ export function NetworksPanel({
                       </button>
                     </div>
                   </div>
+
+                  {confirmClear === network.id && (
+                    <div
+                      className="mt-2 rounded-lg border p-2.5"
+                      style={{ borderColor: "var(--status-warning)" }}
+                    >
+                      <p className="text-sm">
+                        Delete all {network.scanCount} scan{network.scanCount === 1 ? "" : "s"}{" "}
+                        recorded for <strong>{network.name}</strong>? The network itself, its
+                        fingerprint and controller settings stay; the next scan starts a fresh
+                        history. Useful when scans from before version 1.2 mixed several sites
+                        into one list.
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <Button
+                          variant="danger"
+                          onClick={() => run(() => api.clearNetworkHistory(network.id))}
+                          disabled={busy}
+                        >
+                          Clear history
+                        </Button>
+                        <Button onClick={() => setConfirmClear(null)} disabled={busy}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  )}
 
                   {confirmDelete === network.id && (
                     <div

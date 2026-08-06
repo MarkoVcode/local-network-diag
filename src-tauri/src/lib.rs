@@ -642,6 +642,47 @@ async fn rename_network(
     index.save(root).await
 }
 
+/// Deletes a network's scan history while keeping the network itself — the
+/// fingerprint, name and controller settings survive.
+///
+/// Exists for starting over: scans recorded before the scan-routing fix could
+/// mix several sites into one history, and there is no untangling them after
+/// the fact — a clean slate is the honest reset.
+#[tauri::command]
+async fn clear_network_history(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<usize, String> {
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+    if index.get(&id).is_none() {
+        return Err("No such network".into());
+    }
+
+    let removed = Store::new(NetworkIndex::scans_dir(root, &id)).clear().await;
+
+    if let Some(profile) = index.get_mut(&id) {
+        profile.scan_count = 0;
+        profile.last_seen_at = None;
+    }
+    index.save(root).await?;
+
+    // The next scan against this network is a fresh baseline, and any
+    // remembered "latest snapshot" no longer exists.
+    if state.active_network.lock().await.as_deref() == Some(id.as_str()) {
+        *state.last_snapshot_id.lock().await = None;
+    }
+
+    Ok(removed)
+}
+
+/// What "Run scan" would sweep right now. Interface enumeration only — cheap
+/// enough for the UI to call as the user types an extra range.
+#[tauri::command]
+fn preview_scan_targets(extra_ranges: Vec<String>) -> Vec<ScanTarget> {
+    scan::hostinfo::preview_targets(&extra_ranges)
+}
+
 /// Removes a network and everything recorded for it.
 #[tauri::command]
 async fn delete_network(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
@@ -1031,6 +1072,8 @@ pub fn run() {
             switch_network,
             refresh_network_fingerprint,
             rename_network,
+            clear_network_history,
+            preview_scan_targets,
             delete_network,
             get_unifi_config,
             save_unifi_config,

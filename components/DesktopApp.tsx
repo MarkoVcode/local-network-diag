@@ -38,6 +38,7 @@ import {
   type PhaseState,
   type PortProfile,
   type ScanSnapshot,
+  type ScanTarget,
 } from "@/lib/types";
 
 type Section =
@@ -83,6 +84,7 @@ export function DesktopApp() {
   const [networks, setNetworks] = useState<NetworkProfile[]>([]);
   const [activeNetwork, setActiveNetwork] = useState<string>();
   const [detection, setDetection] = useState<Detection | null>(null);
+  const [scanTargets, setScanTargets] = useState<ScanTarget[] | null>(null);
 
   const mounted = useRef(true);
 
@@ -189,6 +191,22 @@ export function DesktopApp() {
       mounted.current = false;
     };
   }, [loadSnapshot, refreshDoctor, refreshNetworks]);
+
+  // What "Run scan" would sweep, shown under the button so the target is never
+  // a mystery. Debounced because it re-runs as the extra-range field is typed;
+  // refreshed on refreshToken so a completed scan or network switch updates it.
+  useEffect(() => {
+    if (!api.isDesktop()) return;
+    const timer = setTimeout(async () => {
+      try {
+        const targets = await api.previewScanTargets(extraRange.trim() ? [extraRange.trim()] : []);
+        if (mounted.current) setScanTargets(targets);
+      } catch {
+        // The preview is informational; a failure just leaves it blank.
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [extraRange, refreshToken, activeNetwork]);
 
   // Live progress. Subscribed once for the app's lifetime, so a run started by
   // the auto-repeat timer streams here too.
@@ -378,7 +396,7 @@ export function DesktopApp() {
             always visible (the sidebar never scrolls away), stage by stage. */}
         <div className="border-t p-3" style={{ borderColor: "var(--border)" }}>
           {running ? (
-            <ScanDock phases={phases} />
+            <ScanDock phases={phases} targets={scanTargets} />
           ) : (
             <>
               <Button
@@ -389,6 +407,8 @@ export function DesktopApp() {
               >
                 Run scan
               </Button>
+
+              <TargetPreview targets={scanTargets} />
 
               <ScanOptions
                 portProfile={portProfile}
@@ -576,18 +596,55 @@ export function DesktopApp() {
 }
 
 /**
+ * What "Run scan" will sweep (idle) or is sweeping (running). The default is
+ * the local subnet, which was previously never stated anywhere — an empty
+ * extra-range field made it look like the scan had no defined target.
+ */
+function TargetPreview({ targets }: { targets: ScanTarget[] | null }) {
+  if (targets === null) return null;
+  if (targets.length === 0) {
+    return (
+      <p className="mt-2 text-[11px]" style={{ color: "var(--status-warning)" }}>
+        No scannable network detected.
+      </p>
+    );
+  }
+  const hosts = targets.reduce((sum, target) => sum + target.hostCount, 0);
+  return (
+    <p className="mt-2 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+      Scans{" "}
+      <span className="font-mono tabular">{targets.map((t) => t.cidr).join(" · ")}</span>{" "}
+      ({hosts} addresses)
+    </p>
+  );
+}
+
+/**
  * The scan-in-progress view of the sidebar dock.
  *
  * It lives where the Run-scan button was, so progress is always on screen —
  * the sidebar never scrolls — and each stage gets its own bar rather than one
  * line that scrolls out of the main area.
  */
-function ScanDock({ phases }: { phases: PhaseState[] }) {
+function ScanDock({
+  phases,
+  targets,
+}: {
+  phases: PhaseState[];
+  targets: ScanTarget[] | null;
+}) {
   return (
     <div>
       <Button variant="danger" onClick={() => api.cancelScan()}>
         Cancel scan
       </Button>
+
+      {targets !== null && targets.length > 0 && (
+        <p className="mt-2 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+          Scanning{" "}
+          <span className="font-mono tabular">{targets.map((t) => t.cidr).join(" · ")}</span>
+        </p>
+      )}
 
       {phases.length === 0 ? (
         <p

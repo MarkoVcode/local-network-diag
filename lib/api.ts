@@ -23,6 +23,7 @@ import type {
   ScanEvent,
   ScanSnapshot,
   ScanStatus,
+  ScanTarget,
   SnapshotSummary,
 } from "./types";
 
@@ -180,6 +181,16 @@ export async function renameNetwork(id: string, name: string): Promise<void> {
 
 export async function deleteNetwork(id: string): Promise<void> {
   return invoke("delete_network", { id });
+}
+
+/** Deletes a network's scans but keeps the network and its settings. */
+export async function clearNetworkHistory(id: string): Promise<number> {
+  return invoke<number>("clear_network_history", { id });
+}
+
+/** What "Run scan" would sweep right now. */
+export async function previewScanTargets(extraRanges: string[]): Promise<ScanTarget[]> {
+  return invoke<ScanTarget[]>("preview_scan_targets", { extraRanges });
 }
 
 /** Re-fingerprints the active network from where the machine is now. */

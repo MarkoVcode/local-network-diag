@@ -28,7 +28,10 @@ pub const TRACE_TOOL: super::ToolRef = super::ToolRef {
 };
 pub const WIFI_TOOL: super::ToolRef = super::ToolRef {
     command: "netsh",
-    remedy: "Ships with Windows. Wi-Fi scanning also requires the WLAN AutoConfig service to be running.",
+    remedy: "Ships with Windows — nothing needs installing. Wi-Fi scanning needs a wireless \
+             adapter, the WLAN AutoConfig service (wlansvc) running and, on Windows 11 24H2 \
+             or later, Location access for desktop apps (Settings → Privacy & security → \
+             Location → \"Let desktop apps access your location\").",
 };
 
 /// Windows `ping` uses `-n` for count and `-w` for a per-reply timeout in
@@ -285,9 +288,44 @@ pub(crate) fn parse_tracert(output: &str) -> Vec<TraceHop> {
     hops
 }
 
-/// Wi-Fi survey via `netsh wlan`. Requires the WLAN AutoConfig service; on a
-/// desktop with no wireless adapter netsh reports an error, which is surfaced
-/// as "unavailable" rather than an error the user must act on.
+/// Maps netsh's failure text to what the user can actually do about it.
+///
+/// netsh itself ships with Windows — there is nothing to install — so every
+/// failure is environmental: a stopped service, a privacy setting, or absent
+/// hardware. Matching is loose because netsh output is localised; the English
+/// markers cover the common cases and anything else falls through to the
+/// caller's generic message.
+pub(crate) fn explain_netsh_failure(output: &str) -> Option<&'static str> {
+    let lowered = output.to_ascii_lowercase();
+
+    if lowered.contains("wireless autoconfig service") || lowered.contains("wlansvc") {
+        return Some(
+            "The WLAN AutoConfig service (wlansvc) is not running, so Windows cannot scan for \
+             Wi-Fi. Start it in the Services app, or run `net start wlansvc` as administrator.",
+        );
+    }
+    if lowered.contains("no wireless interface") {
+        return Some(
+            "Windows reports no wireless interface — this machine has no Wi-Fi adapter, or its \
+             driver is disabled in Device Manager. (Remote Desktop sessions also hide the \
+             wireless adapter.)",
+        );
+    }
+    if lowered.contains("location") || lowered.contains("access is denied") {
+        return Some(
+            "Windows blocked the Wi-Fi scan for privacy reasons. Since Windows 11 24H2, listing \
+             networks requires Location access: Settings → Privacy & security → Location → \
+             enable \"Let desktop apps access your location\".",
+        );
+    }
+
+    None
+}
+
+/// Wi-Fi survey via `netsh wlan`. netsh is built into Windows, so a failure is
+/// never a missing tool — the interesting part is saying *which* environmental
+/// cause applies, because "unavailable" alone sends users hunting for an
+/// installation that does not exist.
 pub async fn wifi_survey() -> ProbeResult<WifiInfo> {
     let interfaces = run(
         "netsh",
@@ -296,9 +334,14 @@ pub async fn wifi_survey() -> ProbeResult<WifiInfo> {
     )
     .await;
 
+    let interfaces_text = format!("{}\n{}", interfaces.stdout, interfaces.stderr);
+    if let Some(reason) = explain_netsh_failure(&interfaces_text) {
+        return ProbeResult::unavailable(reason);
+    }
     if !interfaces.has_output() {
         return ProbeResult::unavailable(
-            "netsh reported no WLAN interface — this machine may have no Wi-Fi adapter, or the WLAN AutoConfig service is stopped",
+            "netsh produced no output for `wlan show interfaces` — this machine may have no \
+             Wi-Fi adapter, or the WLAN AutoConfig service (wlansvc) is stopped",
         );
     }
 
@@ -331,7 +374,19 @@ pub async fn wifi_survey() -> ProbeResult<WifiInfo> {
     }
 
     if networks.is_empty() {
-        return ProbeResult::unavailable("no Wi-Fi networks visible");
+        let networks_text = format!("{}\n{}", networks_out.stdout, networks_out.stderr);
+        if let Some(reason) = explain_netsh_failure(&networks_text) {
+            return ProbeResult::unavailable(reason);
+        }
+        // An interface exists but zero networks came back. Genuine radio
+        // silence is possible but rare; on Windows 11 24H2+ the usual cause is
+        // the Location privacy gate, which netsh does not always name.
+        return ProbeResult::unavailable(
+            "netsh listed no Wi-Fi networks. If this machine has working Wi-Fi, the usual \
+             cause on Windows 11 24H2 and later is Location permission — Settings → Privacy \
+             & security → Location → enable \"Let desktop apps access your location\". Also \
+             check the WLAN AutoConfig service (wlansvc) is running.",
+        );
     }
 
     ProbeResult::ok(crate::scan::wifi::assemble(interface, networks))
@@ -521,6 +576,32 @@ mod tests {
             "an empty SSID is a hidden network"
         );
         assert_eq!(networks[0].security.as_deref(), Some("WPA2-Personal"));
+    }
+
+    #[test]
+    fn netsh_failures_map_to_actionable_causes() {
+        // Real message when wlansvc is stopped.
+        let stopped = "The Wireless AutoConfig Service (wlansvc) is not running.";
+        assert!(explain_netsh_failure(stopped)
+            .unwrap()
+            .contains("net start wlansvc"));
+
+        // Real message on a machine with no Wi-Fi adapter.
+        let no_adapter = "There is no wireless interface on the system.";
+        assert!(explain_netsh_failure(no_adapter)
+            .unwrap()
+            .contains("no Wi-Fi adapter"));
+
+        // Windows 11 24H2 privacy gate mentions location.
+        let location = "You do not have access to this information. To check the location \
+                        permissions on this device, go to Settings > Privacy & security > Location.";
+        assert!(explain_netsh_failure(location)
+            .unwrap()
+            .contains("Location access"));
+
+        // Ordinary output must not be misread as a failure.
+        assert!(explain_netsh_failure("Interface name : Wi-Fi\nSSID : Home").is_none());
+        assert!(explain_netsh_failure("").is_none());
     }
 
     #[test]
