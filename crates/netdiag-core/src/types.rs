@@ -644,6 +644,10 @@ pub enum ScanEvent {
     Phase { phases: Vec<PhaseState> },
     #[serde(rename_all = "camelCase")]
     Warning { message: String },
+    /// The scan was filed under a different network than the one selected,
+    /// because that is where the machine actually is.
+    #[serde(rename_all = "camelCase")]
+    NetworkChanged { id: String, name: String },
     #[serde(rename_all = "camelCase")]
     Done { snapshot_id: String },
     #[serde(rename_all = "camelCase")]

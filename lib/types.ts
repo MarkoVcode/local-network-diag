@@ -416,6 +416,8 @@ export interface NetworkProfile {
   createdAt: string;
   lastSeenAt?: string;
   scanCount: number;
+  /** A UniFi controller is configured for this network. Set by list_networks. */
+  hasUnifi?: boolean;
 }
 
 export interface NetworkCandidate {
@@ -672,6 +674,8 @@ export interface ScanStatus {
 export type ScanEvent =
   | { type: "phase"; phases: PhaseState[] }
   | { type: "warning"; message: string }
+  /** The scan was filed under a different network than the one selected. */
+  | { type: "networkChanged"; id: string; name: string }
   | { type: "done"; snapshotId: string }
   | { type: "error"; message: string }
   | { type: "cancelled" };

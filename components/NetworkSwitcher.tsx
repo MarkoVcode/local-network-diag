@@ -44,6 +44,21 @@ export function NetworkSwitcher({
 
   const active = networks.find((n) => n.id === activeId);
 
+  // The controller integration is configured per network, so the label marks
+  // exactly where controller data applies — and by absence, where it does not.
+  const unifiTag = (
+    <span
+      className="shrink-0 rounded border px-1 text-[9px] font-semibold uppercase tracking-wide"
+      style={{
+        borderColor: "var(--border-strong)",
+        color: "var(--series-1)",
+      }}
+      title="A UniFi controller is configured for this network"
+    >
+      UniFi
+    </span>
+  );
+
   return (
     <div ref={containerRef} className="relative px-2 pb-2">
       <button
@@ -58,8 +73,11 @@ export function NetworkSwitcher({
           ◈
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium">
-            {active?.name ?? "No network"}
+          <span className="flex items-center gap-1.5">
+            <span className="min-w-0 truncate text-sm font-medium">
+              {active?.name ?? "No network"}
+            </span>
+            {active?.hasUnifi && unifiTag}
           </span>
           <span className="block truncate text-[11px]" style={{ color: "var(--text-muted)" }}>
             {active
@@ -103,7 +121,10 @@ export function NetworkSwitcher({
                     ✓
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate">{network.name}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="min-w-0 truncate">{network.name}</span>
+                      {network.hasUnifi && unifiTag}
+                    </span>
                     <span className="block truncate text-[11px]" style={{ color: "var(--text-muted)" }}>
                       {network.fingerprint.subnets[0] ?? "unknown subnet"}
                     </span>
