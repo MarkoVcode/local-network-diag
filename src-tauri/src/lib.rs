@@ -1253,6 +1253,30 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Whether this process runs elevated.
+///
+/// The app neither needs nor benefits from elevation — worse, under `sudo` it
+/// resolves a different (root-owned) data directory, so the user's networks
+/// seem to vanish. Setup & Status uses this to say so instead of showing the
+/// "runs without administrator privileges" design note as if it were a
+/// detected fact.
+///
+/// Unix only: a reliable Windows check needs the token APIs, and the message
+/// it would unlock changes nothing there.
+#[tauri::command]
+fn is_running_elevated() -> bool {
+    #[cfg(unix)]
+    {
+        // geteuid is what sudo actually changes; SUDO_USER-style environment
+        // variables are advisory and do not survive every elevation path.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /* ----------------------------------------------------------------------- run */
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1301,6 +1325,7 @@ pub fn run() {
             export_snapshot,
             get_data_dir,
             get_app_version,
+            is_running_elevated,
             check_for_update,
             get_update_preferences,
             skip_update_version,

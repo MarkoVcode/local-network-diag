@@ -35,6 +35,11 @@ chrono.workspace = true
 # and tests with no system dependencies at all.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
+# Only for geteuid(), to tell the user that running elevated is unnecessary.
+# Already in the tree transitively via tokio; this just makes it callable.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # Enabled by `tauri dev`/`tauri build` when a custom protocol is in use.
 custom-protocol = ["tauri/custom-protocol"]

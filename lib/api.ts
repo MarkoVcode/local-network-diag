@@ -208,6 +208,11 @@ export async function factoryReset(): Promise<void> {
   return invoke("factory_reset");
 }
 
+/** True when the process runs elevated (Unix; always false on Windows). */
+export async function isRunningElevated(): Promise<boolean> {
+  return invoke<boolean>("is_running_elevated");
+}
+
 /** What "Run scan" would sweep right now. */
 export async function previewScanTargets(extraRanges: string[]): Promise<ScanTarget[]> {
   return invoke<ScanTarget[]>("preview_scan_targets", { extraRanges });

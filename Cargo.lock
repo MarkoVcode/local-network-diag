@@ -2040,6 +2040,7 @@ version = "1.2.1"
 dependencies = [
  "chrono",
  "keyring",
+ "libc",
  "netdiag-core",
  "serde",
  "serde_json",

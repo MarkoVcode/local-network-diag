@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, StatusBadge, type StatusTone } from "./ui";
 import * as api from "@/lib/api";
 import type { CapabilityReport, CapabilityStatus, DoctorReport, Tier } from "@/lib/types";
@@ -51,6 +51,16 @@ export function SetupPanel({
   appVersion?: string;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [elevated, setElevated] = useState(false);
+
+  useEffect(() => {
+    api
+      .isRunningElevated()
+      .then(setElevated)
+      .catch(() => {
+        // Unknown is treated as not elevated; the design note still applies.
+      });
+  }, []);
 
   if (!report) {
     return (
@@ -180,10 +190,19 @@ export function SetupPanel({
             <dd className="min-w-0 flex-1 break-all font-mono text-xs">{dataDir ?? "—"}</dd>
           </div>
         </dl>
-        <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
-          This app runs without administrator privileges. It scans only private address ranges,
-          and refuses anything wider than a /22.
-        </p>
+        {elevated ? (
+          <p className="mt-3 text-xs" style={{ color: "var(--status-warning)" }}>
+            Running with administrator privileges — this is unnecessary. The app is designed to
+            work unprivileged, elevation adds no capability, and under sudo it uses root&apos;s
+            data directory, so your normal networks and histories will not appear. It still
+            scans only private address ranges and refuses anything wider than a /22.
+          </p>
+        ) : (
+          <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+            Runs without administrator privileges by design — elevation is never needed. It
+            scans only private address ranges, and refuses anything wider than a /22.
+          </p>
+        )}
       </Card>
 
       <DangerZone />
