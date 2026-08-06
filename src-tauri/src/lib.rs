@@ -443,9 +443,12 @@ async fn get_status(state: State<'_, Arc<AppState>>) -> Result<ScanStatus, Strin
     let phases = state.phases.lock().await.clone();
     let last = state.last_snapshot_id.lock().await.clone();
 
+    // Only the id is needed here; `load_latest()` would parse the entire
+    // newest snapshot just to read it, and the frontend immediately loads the
+    // same snapshot again — a double full parse on every launch.
     let last_snapshot_id = match last {
         Some(id) => Some(id),
-        None => state.store().await.load_latest().await.map(|s| s.id),
+        None => state.store().await.list_ids().await.first().cloned(),
     };
 
     Ok(ScanStatus {

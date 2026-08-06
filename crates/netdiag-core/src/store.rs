@@ -9,6 +9,39 @@ use std::path::{Path, PathBuf};
 
 const MAX_SNAPSHOTS: usize = 200;
 
+/// The slice of a stored snapshot that a [`SnapshotSummary`] needs. Element
+/// contents are skipped ([`serde::de::IgnoredAny`]) — only the counts survive.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SummaryProbe {
+    id: String,
+    started_at: String,
+    #[serde(default)]
+    duration_ms: u64,
+    #[serde(default)]
+    devices: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    warnings: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    connectivity: ConnectivityProbe,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectivityProbe {
+    #[serde(default)]
+    gateway: Option<GatewayProbe>,
+    #[serde(default)]
+    wan_reachable: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayProbe {
+    #[serde(default)]
+    avg_ms: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
@@ -91,17 +124,28 @@ impl Store {
         let mut out = Vec::new();
 
         for id in ids.into_iter().take(limit) {
-            let Some(snapshot) = self.load(&id).await else {
+            if !Self::is_valid_id(&id) {
+                continue;
+            }
+            let path = self.root.join(format!("{id}.json"));
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            // Deserialize only the seven summary fields. Building the full
+            // ScanSnapshot allocates every device, banner and controller record
+            // in the file — for a history list of fifty rich snapshots that is
+            // the difference between the panel opening instantly and not.
+            let Ok(probe) = serde_json::from_slice::<SummaryProbe>(&bytes) else {
                 continue;
             };
             out.push(SnapshotSummary {
-                id: snapshot.id,
-                started_at: snapshot.started_at,
-                duration_ms: snapshot.duration_ms,
-                device_count: snapshot.devices.len(),
-                gateway_latency_ms: snapshot.connectivity.gateway.and_then(|g| g.avg_ms),
-                wan_reachable: snapshot.connectivity.wan_reachable,
-                warnings: snapshot.warnings.len(),
+                id: probe.id,
+                started_at: probe.started_at,
+                duration_ms: probe.duration_ms,
+                device_count: probe.devices.len(),
+                gateway_latency_ms: probe.connectivity.gateway.and_then(|g| g.avg_ms),
+                wan_reachable: probe.connectivity.wan_reachable,
+                warnings: probe.warnings.len(),
             });
         }
 
@@ -720,6 +764,48 @@ mod tests {
         assert_eq!(store.list_ids().await.len(), 1);
 
         assert!(store.delete(&snap.id).await);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn summaries_match_the_snapshot_without_a_full_parse() {
+        // The partial-deserialize path must report the same facts the full
+        // snapshot would — counts, timing, gateway stats — or history lies.
+        let dir = std::env::temp_dir().join(format!("netdiag-sum-test-{}", std::process::id()));
+        let store = Store::new(&dir);
+
+        let mut snap = snapshot(
+            "2026-08-04T00-00-01-000Z",
+            vec![
+                device("10.0.3.1", None, "gw", &[80]),
+                device("10.0.3.2", None, "nas", &[22, 443]),
+            ],
+            PortProfile::Standard,
+        );
+        snap.warnings.push("one warning".into());
+        snap.connectivity.gateway = Some(LatencyStats {
+            target: "10.0.3.1".into(),
+            label: "gateway".into(),
+            sent: 5,
+            received: 5,
+            loss_percent: 0.0,
+            min_ms: Some(1.0),
+            avg_ms: Some(2.5),
+            max_ms: Some(4.0),
+            jitter_ms: Some(0.5),
+            samples: vec![1.0, 2.5, 4.0],
+        });
+        store.save(&snap).await.unwrap();
+
+        let summaries = store.summaries(10).await;
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.id, snap.id);
+        assert_eq!(summary.device_count, 2);
+        assert_eq!(summary.warnings, 1);
+        assert_eq!(summary.gateway_latency_ms, Some(2.5));
+        assert!(summary.wan_reachable);
+
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
