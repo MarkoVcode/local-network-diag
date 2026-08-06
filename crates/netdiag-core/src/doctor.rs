@@ -809,19 +809,28 @@ pub async fn run_diagnostics_at(
         clear_tool_cache().await;
     }
 
+    // Concurrent, not sequential: the probes are independent, and two of them
+    // dominate the clock — the Wi-Fi survey (seconds) and, when a controller is
+    // configured but unreachable, the UniFi login timeouts (tens of seconds).
+    // Run serially they add up; run together the report takes as long as the
+    // slowest probe. This report gates nothing, but the faster it lands the
+    // sooner the UI can show capability state.
+    let (interfaces, tcp, icmp, arp, dns, mdns, ssdp, netbios, wifi, traceroute, oui, unifi) = tokio::join!(
+        check_interfaces(),
+        check_tcp(),
+        check_icmp(),
+        check_arp(),
+        check_dns(),
+        check_mdns(),
+        check_ssdp(),
+        check_netbios(),
+        check_wifi(),
+        check_traceroute(),
+        check_oui(),
+        check_unifi(root, unifi_password),
+    );
     let capabilities = vec![
-        check_interfaces().await,
-        check_tcp().await,
-        check_icmp().await,
-        check_arp().await,
-        check_dns().await,
-        check_mdns().await,
-        check_ssdp().await,
-        check_netbios().await,
-        check_wifi().await,
-        check_traceroute().await,
-        check_oui().await,
-        check_unifi(root, unifi_password).await,
+        interfaces, tcp, icmp, arp, dns, mdns, ssdp, netbios, wifi, traceroute, oui, unifi,
     ];
 
     let mut counts = DoctorCounts::default();

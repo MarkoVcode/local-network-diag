@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Button, Card, StatusBadge, type StatusTone } from "./ui";
+import * as api from "@/lib/api";
 import type { CapabilityReport, CapabilityStatus, DoctorReport, Tier } from "@/lib/types";
 
 /**
@@ -157,11 +158,14 @@ export function SetupPanel({
 
       <Card title="About">
         <dl className="space-y-1 text-sm">
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <dt className="w-40 shrink-0 text-xs" style={{ color: "var(--text-secondary)" }}>
               Version
             </dt>
-            <dd className="tabular">{appVersion ?? "—"}</dd>
+            <dd className="flex flex-wrap items-center gap-3 tabular">
+              {appVersion ?? "—"}
+              <UpdateCheckButton />
+            </dd>
           </div>
           <div className="flex flex-wrap gap-2">
             <dt className="w-40 shrink-0 text-xs" style={{ color: "var(--text-secondary)" }}>
@@ -182,6 +186,56 @@ export function SetupPanel({
         </p>
       </Card>
     </div>
+  );
+}
+
+/**
+ * A manual, cache-bypassing update check.
+ *
+ * The automatic startup check caches its result for several hours to protect
+ * the GitHub rate limit — which means a release published within that window
+ * is invisible until the cache expires. This button is the escape hatch.
+ */
+function UpdateCheckButton() {
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<string | React.ReactNode | null>(null);
+
+  const check = async () => {
+    setChecking(true);
+    setResult(null);
+    try {
+      const info = await api.checkForUpdate(true);
+      if (!info) {
+        setResult("Could not reach GitHub — check again later.");
+      } else if (info.updateAvailable) {
+        setResult(
+          <a
+            href={info.releaseUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+            style={{ color: "var(--series-1)" }}
+          >
+            Version {info.latestVersion} is available →
+          </a>,
+        );
+      } else {
+        setResult(`Up to date — ${info.latestVersion} is the latest release.`);
+      }
+    } catch {
+      setResult("The update check failed.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <span className="flex flex-wrap items-center gap-2 text-xs">
+      <Button onClick={check} disabled={checking}>
+        {checking ? "Checking…" : "Check for updates"}
+      </Button>
+      {result && <span style={{ color: "var(--text-secondary)" }}>{result}</span>}
+    </span>
   );
 }
 

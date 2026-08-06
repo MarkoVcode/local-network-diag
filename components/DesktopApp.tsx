@@ -150,8 +150,13 @@ export function DesktopApp() {
     if (!api.isDesktop()) return;
 
     (async () => {
-      const [status] = await Promise.all([api.getStatus(), refreshDoctor(true)]);
+      // The doctor probes hardware and, when a controller is configured, a
+      // live network service — seconds, tens when something is unreachable.
+      // It must never gate showing data that is already on disk, so it runs
+      // concurrently and fills its panel in whenever it finishes.
+      void refreshDoctor(true);
 
+      const status = await api.getStatus();
       if (!mounted.current) return;
       setRunning(status.running);
       setAutoRepeat(status.autoRepeat);
