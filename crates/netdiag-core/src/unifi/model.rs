@@ -114,6 +114,24 @@ impl UnifiClientRecord {
             .find(|value| value.parse::<std::net::Ipv4Addr>().is_ok())
             .cloned()
     }
+
+    /// Normalizes `radio_proto` into the consumer Wi-Fi generation name.
+    ///
+    /// An unrecognized value passes through untouched — a future `radio_proto`
+    /// should show up raw rather than disappear.
+    pub fn wifi_generation(&self) -> Option<String> {
+        let proto = self.radio_proto.as_deref()?.trim().to_ascii_lowercase();
+        let label = match proto.as_str() {
+            "" => return None,
+            "b" | "g" => return Some(format!("802.11{proto}")),
+            "n" | "ng" | "na" => "Wi-Fi 4 (n)",
+            "ac" => "Wi-Fi 5 (ac)",
+            "ax" => "Wi-Fi 6 (ax)",
+            "be" => "Wi-Fi 7 (be)",
+            _ => return Some(proto),
+        };
+        Some(label.to_string())
+    }
 }
 
 /// A port on a UniFi switch.
@@ -129,6 +147,18 @@ pub struct PortEntry {
     /// MACs the switch has learned on this port. More than one means something
     /// unmanaged is plugged in behind it.
     pub mac_table: Option<Vec<MacTableEntry>>,
+}
+
+impl PortEntry {
+    /// PoE draw in watts. The controller returns this as a number in some
+    /// releases and a numeric string in others; both are accepted.
+    pub fn poe_watts(&self) -> Option<f64> {
+        match self.poe_power.as_ref()? {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -180,6 +210,29 @@ impl UnifiDeviceRecord {
             _ => "UniFi device",
         }
     }
+
+    /// A label for an *abnormal* device state, or `None` when the device is
+    /// simply connected.
+    ///
+    /// Unadopted devices return `None` too: "not adopted" already has its own
+    /// badge, and stacking a state on top would say the same thing twice.
+    pub fn state_problem(&self) -> Option<String> {
+        let state = self.state?;
+        if state == 1 || self.adopted != Some(true) {
+            return None;
+        }
+        Some(match state {
+            0 => "Disconnected".to_string(),
+            2 => "Adoption pending".to_string(),
+            4 => "Upgrading".to_string(),
+            5 => "Provisioning".to_string(),
+            6 => "Heartbeat missed".to_string(),
+            7 => "Adopting".to_string(),
+            9 => "Adoption error".to_string(),
+            11 => "Isolated".to_string(),
+            other => format!("State {other}"),
+        })
+    }
 }
 
 /// Everything fetched from the controller in one pass.
@@ -213,10 +266,46 @@ pub struct UnifiDeviceSummary {
     pub adopted: bool,
     pub upgradable: bool,
     pub uptime_seconds: Option<i64>,
+    /// Present only when the device is in an abnormal state — see
+    /// [`UnifiDeviceRecord::state_problem`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_label: Option<String>,
+    /// Physical ports, for switches. Defaulted so pre-1.2 snapshots still load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<UnifiPortSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiPortSummary {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub up: bool,
+    /// Negotiated speed in Mbps, when the port is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_mbps: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poe_watts: Option<f64>,
 }
 
 impl From<&UnifiDeviceRecord> for UnifiDeviceSummary {
     fn from(record: &UnifiDeviceRecord) -> Self {
+        let ports = record
+            .port_table
+            .iter()
+            .flatten()
+            .filter_map(|port| {
+                Some(UnifiPortSummary {
+                    index: port.port_idx?,
+                    name: port.name.clone().filter(|n| !n.trim().is_empty()),
+                    up: port.up.unwrap_or(false),
+                    speed_mbps: port.speed.filter(|s| *s > 0),
+                    poe_watts: port.poe_watts(),
+                })
+            })
+            .collect();
+
         Self {
             mac: record.mac.clone(),
             ip: record.ip.clone(),
@@ -227,6 +316,8 @@ impl From<&UnifiDeviceRecord> for UnifiDeviceSummary {
             adopted: record.adopted.unwrap_or(false),
             upgradable: record.upgradable.unwrap_or(false),
             uptime_seconds: record.uptime,
+            state_label: record.state_problem(),
+            ports,
         }
     }
 }
@@ -292,6 +383,43 @@ impl UnifiSnapshot {
 
         out
     }
+
+    /// Ports running at 10/100 Mbps on hardware that demonstrably does better.
+    ///
+    /// The comparison against the device's own fastest live port matters: it is
+    /// what separates "gigabit switch with one struggling link" (a finding —
+    /// often a damaged cable, since gigabit falls back to 100 Mbps when a wire
+    /// pair fails) from "everything on this switch is a 100 Mbps device"
+    /// (not a finding).
+    pub fn degraded_link_ports(&self) -> Vec<DegradedLinkPort> {
+        let mut out = Vec::new();
+
+        for device in &self.raw_devices {
+            let Some(ports) = &device.port_table else {
+                continue;
+            };
+            let live = |port: &&PortEntry| port.up == Some(true) && port.speed.unwrap_or(0) > 0;
+            let fastest = ports.iter().filter(live).filter_map(|p| p.speed).max();
+            let Some(fastest) = fastest.filter(|speed| *speed >= 1000) else {
+                continue;
+            };
+            for port in ports.iter().filter(live) {
+                let speed = port.speed.unwrap_or(0);
+                if speed > 100 {
+                    continue;
+                }
+                out.push(DegradedLinkPort {
+                    switch_name: device.describe(),
+                    port: port.port_idx.unwrap_or(0),
+                    port_name: port.name.clone().filter(|n| !n.trim().is_empty()),
+                    speed_mbps: speed,
+                    fastest_mbps: fastest,
+                });
+            }
+        }
+
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +429,16 @@ pub struct CrowdedPort {
     pub port: u32,
     pub port_name: Option<String>,
     pub macs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradedLinkPort {
+    pub switch_name: String,
+    pub port: u32,
+    pub port_name: Option<String>,
+    pub speed_mbps: i64,
+    pub fastest_mbps: i64,
 }
 
 #[cfg(test)]
@@ -391,6 +529,139 @@ mod tests {
             Some("10.0.3.50"),
             "the historical record's stale IP must not win"
         );
+    }
+
+    #[test]
+    fn radio_protocols_map_to_wifi_generations() {
+        let gen = |proto: &str| UnifiClientRecord {
+            radio_proto: Some(proto.into()),
+            ..Default::default()
+        }
+        .wifi_generation();
+
+        assert_eq!(gen("ax").as_deref(), Some("Wi-Fi 6 (ax)"));
+        assert_eq!(gen("ac").as_deref(), Some("Wi-Fi 5 (ac)"));
+        assert_eq!(gen("ng").as_deref(), Some("Wi-Fi 4 (n)"));
+        assert_eq!(gen("na").as_deref(), Some("Wi-Fi 4 (n)"));
+        assert_eq!(gen("be").as_deref(), Some("Wi-Fi 7 (be)"));
+        assert_eq!(gen("g").as_deref(), Some("802.11g"));
+        // A future protocol must pass through raw, not vanish.
+        assert_eq!(gen("xy").as_deref(), Some("xy"));
+        assert_eq!(gen("  ").as_deref(), None);
+        assert_eq!(UnifiClientRecord::default().wifi_generation(), None);
+    }
+
+    #[test]
+    fn poe_power_is_read_from_number_and_string_forms() {
+        let watts = |raw: &str| -> Option<f64> {
+            let port: PortEntry =
+                serde_json::from_str(&format!(r#"{{"poe_power":{raw}}}"#)).unwrap();
+            port.poe_watts()
+        };
+
+        assert_eq!(watts("6.5"), Some(6.5));
+        assert_eq!(watts(r#""6.5""#), Some(6.5), "some releases send a string");
+        assert_eq!(watts(r#""not a number""#), None);
+        assert_eq!(PortEntry::default().poe_watts(), None);
+    }
+
+    #[test]
+    fn abnormal_states_are_labelled_and_normal_ones_are_not() {
+        let device = |state: i64, adopted: bool| -> UnifiDeviceRecord {
+            serde_json::from_str(&format!(r#"{{"state":{state},"adopted":{adopted}}}"#)).unwrap()
+        };
+
+        assert_eq!(device(1, true).state_problem(), None, "connected is normal");
+        assert_eq!(
+            device(6, true).state_problem().as_deref(),
+            Some("Heartbeat missed")
+        );
+        assert_eq!(device(0, true).state_problem().as_deref(), Some("Disconnected"));
+        assert_eq!(
+            device(42, true).state_problem().as_deref(),
+            Some("State 42"),
+            "unknown states surface rather than hide"
+        );
+        assert_eq!(
+            device(0, false).state_problem(),
+            None,
+            "unadopted devices already carry their own badge"
+        );
+    }
+
+    #[test]
+    fn summaries_carry_ports_and_state() {
+        let device: UnifiDeviceRecord = serde_json::from_str(
+            r#"{"name":"USW_MINI","model":"USMINI","type":"usw","adopted":true,"state":6,
+                "port_table":[
+                    {"port_idx":1,"name":"Camera","up":true,"speed":100,"poe_power":"4.2"},
+                    {"port_idx":2,"up":false},
+                    {"name":"no index — dropped"}
+                ]}"#,
+        )
+        .unwrap();
+
+        let summary = UnifiDeviceSummary::from(&device);
+        assert_eq!(summary.state_label.as_deref(), Some("Heartbeat missed"));
+        assert_eq!(summary.ports.len(), 2, "a port without an index is useless");
+        assert_eq!(summary.ports[0].speed_mbps, Some(100));
+        assert_eq!(summary.ports[0].poe_watts, Some(4.2));
+        assert!(!summary.ports[1].up);
+        assert_eq!(summary.ports[1].speed_mbps, None);
+    }
+
+    #[test]
+    fn pre_port_summaries_still_deserialize() {
+        // A stored 1.1.0 snapshot has no stateLabel/ports keys.
+        let old = r#"{"mac":null,"ip":null,"name":"AP","kind":"Access point",
+                      "model":null,"version":null,"adopted":true,"upgradable":false,
+                      "uptimeSeconds":null}"#;
+        let summary: UnifiDeviceSummary = serde_json::from_str(old).unwrap();
+        assert!(summary.ports.is_empty());
+        assert!(summary.state_label.is_none());
+    }
+
+    #[test]
+    fn a_slow_port_on_a_gigabit_switch_is_degraded() {
+        let switch: UnifiDeviceRecord = serde_json::from_str(
+            r#"{"name":"USW","model":"US8","type":"usw","port_table":[
+                {"port_idx":1,"up":true,"speed":1000},
+                {"port_idx":2,"name":"Study","up":true,"speed":100},
+                {"port_idx":3,"up":false,"speed":0},
+                {"port_idx":4,"up":true,"speed":10}
+            ]}"#,
+        )
+        .unwrap();
+
+        let snapshot = UnifiSnapshot {
+            raw_devices: vec![switch],
+            ..Default::default()
+        };
+        let degraded = snapshot.degraded_link_ports();
+
+        assert_eq!(degraded.len(), 2, "down ports are not degraded, just off");
+        assert_eq!(degraded[0].port, 2);
+        assert_eq!(degraded[0].speed_mbps, 100);
+        assert_eq!(degraded[0].fastest_mbps, 1000);
+        assert_eq!(degraded[1].port, 4);
+    }
+
+    #[test]
+    fn an_all_fast_ethernet_switch_has_no_degraded_links() {
+        // Nothing proves this hardware can do better, so nothing is a finding.
+        let switch: UnifiDeviceRecord = serde_json::from_str(
+            r#"{"name":"OldSwitch","type":"usw","port_table":[
+                {"port_idx":1,"up":true,"speed":100},
+                {"port_idx":2,"up":true,"speed":100}
+            ]}"#,
+        )
+        .unwrap();
+
+        let snapshot = UnifiSnapshot {
+            raw_devices: vec![switch],
+            ..Default::default()
+        };
+        assert!(snapshot.degraded_link_ports().is_empty());
     }
 
     #[test]

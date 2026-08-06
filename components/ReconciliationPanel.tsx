@@ -1,7 +1,13 @@
 "use client";
 
+import { Fragment } from "react";
 import { Card, EmptyState, Pill, StatusBadge } from "./ui";
 import type { Reconciliation, UnifiSnapshot } from "@/lib/types";
+
+function formatSpeed(mbps?: number): string {
+  if (mbps === undefined) return "up";
+  return mbps >= 1000 ? `${mbps / 1000} Gbps` : `${mbps} Mbps`;
+}
 
 /**
  * Where the scan and the controller disagree.
@@ -29,11 +35,16 @@ export function ReconciliationPanel({
   }
 
   const { matched, shadow, missed, hiddenSegments, identityConflicts } = reconciliation;
+  // Absent on snapshots stored before these findings existed.
+  const wirelessIssues = reconciliation.wirelessIssues ?? [];
+  const degradedLinks = reconciliation.degradedLinks ?? [];
   const clean =
     shadow.length === 0 &&
     missed.length === 0 &&
     hiddenSegments.length === 0 &&
-    identityConflicts.length === 0;
+    identityConflicts.length === 0 &&
+    wirelessIssues.length === 0 &&
+    degradedLinks.length === 0;
 
   return (
     <div className="space-y-4">
@@ -196,6 +207,60 @@ export function ReconciliationPanel({
         </Card>
       )}
 
+      {wirelessIssues.length > 0 && (
+        <Card
+          title={`Struggling on Wi-Fi — ${wirelessIssues.length}`}
+          subtitle="Connected, but the controller itself rates the connection as poor"
+        >
+          <ul className="space-y-2">
+            {wirelessIssues.map((issue) => (
+              <li key={issue.ip} className="rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{issue.displayName}</span>
+                  <span className="font-mono text-xs tabular" style={{ color: "var(--text-muted)" }}>
+                    {issue.ip}
+                  </span>
+                  {issue.satisfaction !== undefined && (
+                    <StatusBadge
+                      tone={issue.satisfaction < 60 ? "critical" : "warning"}
+                      label={`${issue.satisfaction}%`}
+                    />
+                  )}
+                  {issue.signalDbm !== undefined && <Pill mono>{issue.signalDbm} dBm</Pill>}
+                  {issue.accessPoint && <Pill>{issue.accessPoint}</Pill>}
+                </div>
+                <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                  {issue.explanation}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {degradedLinks.length > 0 && (
+        <Card
+          title={`Degraded links — ${degradedLinks.length}`}
+          subtitle="Switch ports running far below what the hardware can do"
+        >
+          <ul className="space-y-2">
+            {degradedLinks.map((link, i) => (
+              <li key={i} className="rounded-lg border p-3" style={{ borderColor: "var(--border)" }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{link.switchName}</span>
+                  <Pill mono>port {link.port}</Pill>
+                  {link.portName && <Pill>{link.portName}</Pill>}
+                  <StatusBadge tone="warning" label={formatSpeed(link.speedMbps)} />
+                </div>
+                <p className="mt-2 text-sm" style={{ color: "var(--text-secondary)" }}>
+                  {link.explanation}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
       {unifi && unifi.devices.length > 0 && (
         <Card
           title={`Controller infrastructure — ${unifi.devices.length}`}
@@ -217,30 +282,84 @@ export function ReconciliationPanel({
                 </tr>
               </thead>
               <tbody>
-                {unifi.devices.map((device, i) => (
-                  <tr key={i} className="border-b" style={{ borderColor: "var(--border)" }}>
-                    <td className="py-1.5 pr-3">
-                      <span className="font-medium">{device.name}</span>
-                      {device.ip && (
-                        <p className="font-mono text-[11px] tabular" style={{ color: "var(--text-muted)" }}>
-                          {device.ip}
-                        </p>
+                {unifi.devices.map((device, i) => {
+                  const ports = device.ports ?? [];
+                  return (
+                    <Fragment key={i}>
+                      <tr
+                        className={ports.length === 0 ? "border-b" : ""}
+                        style={{ borderColor: "var(--border)" }}
+                      >
+                        <td className="py-1.5 pr-3">
+                          <span className="font-medium">{device.name}</span>
+                          {device.ip && (
+                            <p className="font-mono text-[11px] tabular" style={{ color: "var(--text-muted)" }}>
+                              {device.ip}
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 text-xs">{device.kind}</td>
+                        <td className="py-1.5 pr-3 font-mono text-xs">{device.model ?? "—"}</td>
+                        <td className="py-1.5 pr-3 font-mono text-xs">{device.version ?? "—"}</td>
+                        <td className="py-1.5">
+                          <span className="flex flex-wrap gap-1.5">
+                            {device.stateLabel && (
+                              <StatusBadge tone="critical" label={device.stateLabel} />
+                            )}
+                            {!device.adopted && <StatusBadge tone="warning" label="Not adopted" />}
+                            {device.upgradable && <StatusBadge tone="warning" label="Update available" />}
+                            {device.adopted && !device.upgradable && !device.stateLabel && (
+                              <StatusBadge tone="good" label="Up to date" />
+                            )}
+                          </span>
+                        </td>
+                      </tr>
+                      {ports.length > 0 && (
+                        <tr className="border-b" style={{ borderColor: "var(--border)" }}>
+                          <td colSpan={5} className="pb-2">
+                            <details>
+                              <summary
+                                className="cursor-pointer text-xs"
+                                style={{ color: "var(--text-secondary)" }}
+                              >
+                                Ports — {ports.filter((p) => p.up).length} of {ports.length} up
+                              </summary>
+                              <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                                {ports.map((port) => (
+                                  <li
+                                    key={port.index}
+                                    className="rounded border px-2 py-1 text-xs"
+                                    style={{
+                                      borderColor: "var(--border)",
+                                      opacity: port.up ? 1 : 0.55,
+                                    }}
+                                  >
+                                    <span className="font-mono font-semibold tabular">{port.index}</span>
+                                    {port.name && <span className="ml-1.5">{port.name}</span>}
+                                    <span
+                                      className="ml-1.5 font-mono"
+                                      style={{ color: "var(--text-secondary)" }}
+                                    >
+                                      {port.up ? formatSpeed(port.speedMbps) : "down"}
+                                    </span>
+                                    {port.poeWatts !== undefined && port.poeWatts > 0 && (
+                                      <span
+                                        className="ml-1.5 font-mono"
+                                        style={{ color: "var(--text-secondary)" }}
+                                      >
+                                        ⚡{port.poeWatts.toFixed(1)} W
+                                      </span>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="py-1.5 pr-3 text-xs">{device.kind}</td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">{device.model ?? "—"}</td>
-                    <td className="py-1.5 pr-3 font-mono text-xs">{device.version ?? "—"}</td>
-                    <td className="py-1.5">
-                      <span className="flex flex-wrap gap-1.5">
-                        {!device.adopted && <StatusBadge tone="warning" label="Not adopted" />}
-                        {device.upgradable && <StatusBadge tone="warning" label="Update available" />}
-                        {device.adopted && !device.upgradable && (
-                          <StatusBadge tone="good" label="Up to date" />
-                        )}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

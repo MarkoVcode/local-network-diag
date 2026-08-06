@@ -71,6 +71,33 @@ pub struct MissedDevice {
     pub explanation: String,
 }
 
+/// A wireless client whose connection the controller itself rates as poor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WirelessHealthIssue {
+    pub ip: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub satisfaction: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_dbm: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_point: Option<String>,
+    pub explanation: String,
+}
+
+/// A switch port linked far below what its own hardware demonstrates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DegradedLink {
+    pub switch_name: String,
+    pub port: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_name: Option<String>,
+    pub speed_mbps: i64,
+    pub explanation: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HiddenSegment {
@@ -96,6 +123,13 @@ pub struct Reconciliation {
     pub hidden_segments: Vec<HiddenSegment>,
     /// Devices whose controller identity contradicts observed behaviour.
     pub identity_conflicts: Vec<String>,
+    /// Wireless clients the controller itself rates as struggling.
+    /// Defaulted so snapshots stored before 1.2 still load.
+    #[serde(default)]
+    pub wireless_issues: Vec<WirelessHealthIssue>,
+    /// Switch ports negotiated far below the switch's demonstrated speed.
+    #[serde(default)]
+    pub degraded_links: Vec<DegradedLink>,
     pub summary: String,
 }
 
@@ -112,7 +146,9 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
     let mut matched = 0usize;
     let mut shadow = Vec::new();
     let mut identity_conflicts = Vec::new();
+    let mut wireless_issues = Vec::new();
     let mut seen_macs: HashSet<String> = HashSet::new();
+    let now = chrono::Utc::now().timestamp();
 
     for device in devices.iter_mut() {
         // The scanner's own host and the gateway are not "clients" and would
@@ -170,6 +206,27 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         device.is_wired = record.is_wired;
         device.rssi = record.rssi;
         device.unifi_network = record.network.clone();
+        device.satisfaction = record.satisfaction;
+        device.channel = record.channel;
+        device.wifi_generation = record.wifi_generation();
+        device.tx_bytes = record.tx_bytes;
+        device.rx_bytes = record.rx_bytes;
+        device.unifi_uptime = record.uptime;
+        device.unifi_first_seen = record.first_seen;
+        device.is_guest = record.is_guest;
+        device.unifi_note = record.note.clone().filter(|note| !note.trim().is_empty());
+
+        // A brand-new client is worth a note: "first seen two hours ago" is
+        // the strongest new-device evidence available.
+        if record
+            .first_seen
+            .map(|seen| now - seen < 48 * 3600)
+            .unwrap_or(false)
+        {
+            device
+                .type_evidence
+                .push("controller first saw this device within the last 48 hours".into());
+        }
 
         // Physical location — the thing the scanner can never derive.
         if let (Some(sw_mac), Some(port)) = (&record.sw_mac, record.sw_port) {
@@ -203,13 +260,30 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         if let Some(conflict) = detect_identity_conflict(device, record.fingerprint().as_deref()) {
             identity_conflicts.push(conflict);
         }
+
+        // A guest-network device accepting connections is backwards: guests
+        // browse out, they do not serve in.
+        if record.is_guest == Some(true) && !device.ports.is_empty() {
+            identity_conflicts.push(format!(
+                "{} ({}) is on the guest network but is listening on {} open port(s). Guest \
+                 devices normally initiate connections rather than accept them — worth checking \
+                 whether it belongs on the main network instead, or should not be here at all.",
+                device.display_name,
+                device.ip,
+                device.ports.len()
+            ));
+        }
+
+        if let Some(issue) = detect_wireless_issue(device, record) {
+            wireless_issues.push(issue);
+        }
     }
 
     // Controller-known clients our scan never saw. `stat/alluser` includes every
     // client ever seen, so only recently-active ones are worth reporting —
     // otherwise a phone from last year shows up as a miss forever.
     let mut missed = Vec::new();
-    let cutoff = chrono::Utc::now().timestamp() - 86_400;
+    let cutoff = now - 86_400;
 
     for record in &unifi.clients {
         let Some(mac) = &record.mac else { continue };
@@ -261,7 +335,31 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         })
         .collect();
 
-    let summary = build_summary(matched, &shadow, &missed, &hidden_segments);
+    let degraded_links: Vec<DegradedLink> = unifi
+        .degraded_link_ports()
+        .into_iter()
+        .map(|port| DegradedLink {
+            explanation: format!(
+                "This link negotiated {} Mbps while other ports on {} run at {} Mbps or more. \
+                 Either the connected device only supports this speed, or the cable is faulty — \
+                 a gigabit link with a damaged wire pair falls back to exactly 100 Mbps.",
+                port.speed_mbps, port.switch_name, port.fastest_mbps
+            ),
+            switch_name: port.switch_name,
+            port: port.port,
+            port_name: port.port_name,
+            speed_mbps: port.speed_mbps,
+        })
+        .collect();
+
+    let summary = build_summary(
+        matched,
+        &shadow,
+        &missed,
+        &hidden_segments,
+        &wireless_issues,
+        &degraded_links,
+    );
 
     Reconciliation {
         matched,
@@ -269,8 +367,63 @@ pub fn apply(devices: &mut [Device], unifi: &UnifiSnapshot) -> Reconciliation {
         missed,
         hidden_segments,
         identity_conflicts,
+        wireless_issues,
+        degraded_links,
         summary,
     }
+}
+
+/// Flags a wireless client the controller itself rates as struggling.
+///
+/// Two independent signals are consulted. `satisfaction` is UniFi's own 0–100
+/// experience score. For signal strength, `signal` is dBm when present
+/// (negative), while `rssi` in this API is dB above the noise floor (small
+/// positive) — the same physical fact on two different scales, so each gets its
+/// own threshold.
+fn detect_wireless_issue(
+    device: &Device,
+    record: &crate::unifi::model::UnifiClientRecord,
+) -> Option<WirelessHealthIssue> {
+    let wireless = record.is_wired == Some(false) || record.ap_mac.is_some();
+    if !wireless {
+        return None;
+    }
+
+    let low_satisfaction = matches!(record.satisfaction, Some(score) if score < 60);
+    let signal_dbm = record.signal.filter(|s| *s < 0);
+    let weak_signal = matches!(signal_dbm, Some(dbm) if dbm <= -75)
+        || matches!(record.rssi, Some(rssi) if (0..100).contains(&rssi) && rssi < 15);
+
+    if !low_satisfaction && !weak_signal {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if let Some(score) = record.satisfaction.filter(|_| low_satisfaction) {
+        parts.push(format!(
+            "the controller scores this client's experience at {score} %"
+        ));
+    }
+    if weak_signal {
+        parts.push(match signal_dbm {
+            Some(dbm) => format!("the signal is weak ({dbm} dBm)"),
+            None => "the signal is weak".to_string(),
+        });
+    }
+
+    Some(WirelessHealthIssue {
+        ip: device.ip.clone(),
+        display_name: device.display_name.clone(),
+        satisfaction: record.satisfaction,
+        signal_dbm,
+        access_point: device.access_point.clone(),
+        explanation: format!(
+            "This device works, but poorly: {}. Usually distance to the access point or a \
+             congested channel — moving the device or the AP, or switching bands, is the \
+             usual fix.",
+            parts.join(", and ")
+        ),
+    })
 }
 
 /// Flags a device whose controller-declared identity disagrees with the services
@@ -318,8 +471,15 @@ fn build_summary(
     shadow: &[ShadowDevice],
     missed: &[MissedDevice],
     hidden: &[HiddenSegment],
+    wireless: &[WirelessHealthIssue],
+    degraded: &[DegradedLink],
 ) -> String {
-    if shadow.is_empty() && missed.is_empty() && hidden.is_empty() {
+    if shadow.is_empty()
+        && missed.is_empty()
+        && hidden.is_empty()
+        && wireless.is_empty()
+        && degraded.is_empty()
+    {
         return format!("All {matched} devices are accounted for by the controller.");
     }
 
@@ -332,6 +492,12 @@ fn build_summary(
     }
     if !hidden.is_empty() {
         parts.push(format!("{} port(s) hiding other devices", hidden.len()));
+    }
+    if !wireless.is_empty() {
+        parts.push(format!("{} struggling on Wi-Fi", wireless.len()));
+    }
+    if !degraded.is_empty() {
+        parts.push(format!("{} degraded link(s)", degraded.len()));
     }
     parts.join(", ")
 }
@@ -382,6 +548,15 @@ mod tests {
             vlan: None,
             rssi: None,
             is_wired: None,
+            satisfaction: None,
+            channel: None,
+            wifi_generation: None,
+            tx_bytes: None,
+            rx_bytes: None,
+            unifi_uptime: None,
+            unifi_first_seen: None,
+            is_guest: None,
+            unifi_note: None,
         }
     }
 
@@ -561,6 +736,194 @@ mod tests {
 
         assert_eq!(result.identity_conflicts.len(), 1);
         assert!(result.identity_conflicts[0].contains("remote-shell"));
+    }
+
+    #[test]
+    fn copies_experience_fields_onto_a_matched_device() {
+        let mut devices = vec![device("10.0.3.50", Some("aa:bb:cc:dd:ee:ff"), "x", &[])];
+
+        let mut record = client("aa:bb:cc:dd:ee:ff", "Laptop");
+        record.satisfaction = Some(97);
+        record.channel = Some(149);
+        record.radio_proto = Some("ax".into());
+        record.tx_bytes = Some(1_200);
+        record.rx_bytes = Some(3_400);
+        record.uptime = Some(7_200);
+        record.is_guest = Some(false);
+        record.note = Some("  ".into());
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            ..Default::default()
+        };
+        apply(&mut devices, &unifi);
+
+        assert_eq!(devices[0].satisfaction, Some(97));
+        assert_eq!(devices[0].channel, Some(149));
+        assert_eq!(devices[0].wifi_generation.as_deref(), Some("Wi-Fi 6 (ax)"));
+        assert_eq!(devices[0].tx_bytes, Some(1_200));
+        assert_eq!(devices[0].rx_bytes, Some(3_400));
+        assert_eq!(devices[0].unifi_uptime, Some(7_200));
+        assert_eq!(devices[0].is_guest, Some(false));
+        assert_eq!(devices[0].unifi_note, None, "a blank note is no note");
+    }
+
+    #[test]
+    fn a_recently_first_seen_client_gets_new_device_evidence() {
+        let mut devices = vec![device("10.0.3.50", Some("aa:bb:cc:dd:ee:ff"), "x", &[])];
+        let mut record = client("aa:bb:cc:dd:ee:ff", "New Gadget");
+        record.first_seen = Some(chrono::Utc::now().timestamp() - 3_600);
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            ..Default::default()
+        };
+        apply(&mut devices, &unifi);
+
+        assert!(devices[0]
+            .type_evidence
+            .iter()
+            .any(|e| e.contains("last 48 hours")));
+    }
+
+    #[test]
+    fn a_struggling_wireless_client_is_reported_with_the_reason() {
+        let mut devices = vec![device("10.0.3.70", Some("aa:bb:cc:dd:ee:01"), "x", &[])];
+        let mut record = client("aa:bb:cc:dd:ee:01", "Garden Camera");
+        record.is_wired = Some(false);
+        record.satisfaction = Some(41);
+        record.signal = Some(-82);
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            ..Default::default()
+        };
+        let result = apply(&mut devices, &unifi);
+
+        assert_eq!(result.wireless_issues.len(), 1);
+        let issue = &result.wireless_issues[0];
+        assert_eq!(issue.satisfaction, Some(41));
+        assert_eq!(issue.signal_dbm, Some(-82));
+        assert!(issue.explanation.contains("41 %"));
+        assert!(issue.explanation.contains("-82 dBm"));
+    }
+
+    #[test]
+    fn wired_and_healthy_clients_are_not_wireless_issues() {
+        let mut devices = vec![
+            device("10.0.3.71", Some("aa:bb:cc:dd:ee:02"), "wired", &[]),
+            device("10.0.3.72", Some("aa:bb:cc:dd:ee:03"), "healthy", &[]),
+        ];
+
+        // Low satisfaction, but wired: whatever is wrong, it is not the radio.
+        let mut wired = client("aa:bb:cc:dd:ee:02", "NAS");
+        wired.is_wired = Some(true);
+        wired.satisfaction = Some(30);
+
+        let mut healthy = client("aa:bb:cc:dd:ee:03", "Laptop");
+        healthy.is_wired = Some(false);
+        healthy.satisfaction = Some(95);
+        healthy.signal = Some(-55);
+
+        let unifi = UnifiSnapshot {
+            clients: vec![wired, healthy],
+            ..Default::default()
+        };
+        let result = apply(&mut devices, &unifi);
+        assert!(result.wireless_issues.is_empty());
+    }
+
+    #[test]
+    fn a_positive_rssi_scale_is_not_mistaken_for_dbm() {
+        // UniFi's `rssi` is dB above noise: 45 is a *good* value, and must not
+        // trip a threshold written for dBm. 8 genuinely is weak.
+        let mut devices = vec![
+            device("10.0.3.73", Some("aa:bb:cc:dd:ee:04"), "good", &[]),
+            device("10.0.3.74", Some("aa:bb:cc:dd:ee:05"), "weak", &[]),
+        ];
+
+        let mut good = client("aa:bb:cc:dd:ee:04", "Strong Signal");
+        good.is_wired = Some(false);
+        good.rssi = Some(45);
+
+        let mut weak = client("aa:bb:cc:dd:ee:05", "Far Away");
+        weak.is_wired = Some(false);
+        weak.rssi = Some(8);
+
+        let unifi = UnifiSnapshot {
+            clients: vec![good, weak],
+            ..Default::default()
+        };
+        let result = apply(&mut devices, &unifi);
+
+        assert_eq!(result.wireless_issues.len(), 1);
+        // The controller alias renamed the device before the issue was filed.
+        assert_eq!(result.wireless_issues[0].display_name, "Far Away");
+    }
+
+    #[test]
+    fn a_guest_device_listening_on_ports_is_a_conflict() {
+        let mut devices = vec![device(
+            "10.0.3.80",
+            Some("aa:bb:cc:dd:ee:06"),
+            "Guest Box",
+            &[80, 443],
+        )];
+        let mut record = client("aa:bb:cc:dd:ee:06", "Guest Box");
+        record.is_guest = Some(true);
+
+        let unifi = UnifiSnapshot {
+            clients: vec![record],
+            ..Default::default()
+        };
+        let result = apply(&mut devices, &unifi);
+
+        assert_eq!(result.identity_conflicts.len(), 1);
+        assert!(result.identity_conflicts[0].contains("guest network"));
+
+        // The same guest with nothing listening is unremarkable.
+        let mut quiet_devices = vec![device("10.0.3.80", Some("aa:bb:cc:dd:ee:06"), "g", &[])];
+        let mut quiet = client("aa:bb:cc:dd:ee:06", "Guest Phone");
+        quiet.is_guest = Some(true);
+        let unifi = UnifiSnapshot {
+            clients: vec![quiet],
+            ..Default::default()
+        };
+        assert!(apply(&mut quiet_devices, &unifi)
+            .identity_conflicts
+            .is_empty());
+    }
+
+    #[test]
+    fn degraded_links_surface_with_an_explanation() {
+        let switch: UnifiDeviceRecord = serde_json::from_str(
+            r#"{"name":"USW","model":"US8","type":"usw","port_table":[
+                {"port_idx":1,"up":true,"speed":1000},
+                {"port_idx":5,"name":"Study","up":true,"speed":100}
+            ]}"#,
+        )
+        .unwrap();
+
+        let unifi = UnifiSnapshot {
+            raw_devices: vec![switch],
+            ..Default::default()
+        };
+        let result = apply(&mut Vec::new(), &unifi);
+
+        assert_eq!(result.degraded_links.len(), 1);
+        assert_eq!(result.degraded_links[0].port, 5);
+        assert!(result.degraded_links[0].explanation.contains("cable"));
+        assert!(result.summary.contains("degraded link"));
+    }
+
+    #[test]
+    fn a_pre_wp1_reconciliation_still_deserializes() {
+        // Stored snapshots from 1.1.0 lack the new arrays entirely.
+        let old = r#"{"matched":3,"shadow":[],"missed":[],"hiddenSegments":[],
+                      "identityConflicts":[],"summary":"All 3 devices are accounted for."}"#;
+        let parsed: Reconciliation = serde_json::from_str(old).unwrap();
+        assert!(parsed.wireless_issues.is_empty());
+        assert!(parsed.degraded_links.is_empty());
     }
 
     #[test]

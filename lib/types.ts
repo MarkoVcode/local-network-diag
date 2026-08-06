@@ -189,6 +189,21 @@ export interface Device {
   vlan?: number;
   rssi?: number;
   isWired?: boolean;
+  /** The controller's 0–100 experience score for this client. */
+  satisfaction?: number;
+  channel?: number;
+  /** Normalized radio generation, e.g. "Wi-Fi 6 (ax)". */
+  wifiGeneration?: string;
+  /** Traffic counters from the controller's perspective (shown as TX/RX). */
+  txBytes?: number;
+  rxBytes?: number;
+  /** Seconds this client has been associated, per the controller. */
+  unifiUptime?: number;
+  /** Epoch seconds the controller first ever saw this client. */
+  unifiFirstSeen?: number;
+  isGuest?: boolean;
+  /** Operator note typed into the controller. */
+  unifiNote?: string;
 }
 
 /* --------------------------------------------------------------------- UniFi */
@@ -213,6 +228,19 @@ export interface UnifiDeviceSummary {
   adopted: boolean;
   upgradable: boolean;
   uptimeSeconds?: number;
+  /** Present only when the device is in an abnormal state, e.g. "Heartbeat missed". */
+  stateLabel?: string;
+  /** Physical ports, for switches. Absent on pre-1.2 snapshots. */
+  ports?: UnifiPortSummary[];
+}
+
+export interface UnifiPortSummary {
+  index: number;
+  name?: string;
+  up: boolean;
+  /** Negotiated speed in Mbps, when the port is up. */
+  speedMbps?: number;
+  poeWatts?: number;
 }
 
 export interface UnifiSnapshot {
@@ -253,6 +281,25 @@ export interface HiddenSegment {
   explanation: string;
 }
 
+/** A wireless client whose connection the controller itself rates as poor. */
+export interface WirelessHealthIssue {
+  ip: string;
+  displayName: string;
+  satisfaction?: number;
+  signalDbm?: number;
+  accessPoint?: string;
+  explanation: string;
+}
+
+/** A switch port linked far below what its own hardware demonstrates. */
+export interface DegradedLink {
+  switchName: string;
+  port: number;
+  portName?: string;
+  speedMbps: number;
+  explanation: string;
+}
+
 /** Where the scan and the controller disagree — the point of the integration. */
 export interface Reconciliation {
   matched: number;
@@ -260,6 +307,9 @@ export interface Reconciliation {
   missed: MissedDevice[];
   hiddenSegments: HiddenSegment[];
   identityConflicts: string[];
+  /** Absent on snapshots stored before 1.2. */
+  wirelessIssues?: WirelessHealthIssue[];
+  degradedLinks?: DegradedLink[];
   summary: string;
 }
 

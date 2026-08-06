@@ -90,7 +90,11 @@ export function DeviceDetail({ device }: { device: Device }) {
         device.accessPoint ||
         device.unifiFingerprint ||
         device.unifiNetwork ||
-        device.vlan !== undefined) && (
+        device.vlan !== undefined ||
+        device.satisfaction !== undefined ||
+        device.wifiGeneration ||
+        device.isGuest ||
+        device.unifiNote) && (
         <div>
           <h4 className="mb-1.5 text-xs font-semibold">From the UniFi controller</h4>
           <dl>
@@ -116,12 +120,69 @@ export function DeviceDetail({ device }: { device: Device }) {
                 }
               />
             )}
-            {device.unifiNetwork && <KeyValue label="Network" value={device.unifiNetwork} />}
+            {(device.wifiGeneration || device.channel !== undefined) && (
+              <KeyValue
+                label="Radio"
+                value={[device.wifiGeneration, device.channel !== undefined ? `channel ${device.channel}` : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              />
+            )}
+            {device.satisfaction !== undefined && (
+              <KeyValue
+                label="Experience"
+                value={
+                  <span className="flex flex-wrap items-center gap-2">
+                    <StatusBadge
+                      tone={device.satisfaction < 60 ? "critical" : device.satisfaction < 80 ? "warning" : "good"}
+                      label={`${device.satisfaction}%`}
+                    />
+                    <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                      controller&apos;s own score for this connection
+                    </span>
+                  </span>
+                }
+              />
+            )}
+            {(device.txBytes !== undefined || device.rxBytes !== undefined) && (
+              <KeyValue
+                label="Traffic"
+                value={
+                  <span className="font-mono text-xs tabular">
+                    {`TX ${formatBytes(device.txBytes)} · RX ${formatBytes(device.rxBytes)}`}
+                  </span>
+                }
+              />
+            )}
+            {device.unifiUptime !== undefined && (
+              <KeyValue label="Connected for" value={formatDuration(device.unifiUptime)} />
+            )}
+            {device.unifiFirstSeen !== undefined && (
+              <KeyValue
+                label="Controller first saw it"
+                value={new Date(device.unifiFirstSeen * 1000).toLocaleString()}
+              />
+            )}
+            {device.unifiNetwork && (
+              <KeyValue
+                label="Network"
+                value={
+                  <span className="flex flex-wrap items-center gap-2">
+                    {device.unifiNetwork}
+                    {device.isGuest && <StatusBadge tone="warning" label="Guest" />}
+                  </span>
+                }
+              />
+            )}
+            {device.isGuest && !device.unifiNetwork && (
+              <KeyValue label="Network" value={<StatusBadge tone="warning" label="Guest" />} />
+            )}
             {device.vlan !== undefined && <KeyValue label="VLAN" value={String(device.vlan)} mono />}
             {device.unifiFingerprint && (
               <KeyValue label="Controller fingerprint" value={device.unifiFingerprint} />
             )}
             {device.unifiName && <KeyValue label="Controller alias" value={device.unifiName} />}
+            {device.unifiNote && <KeyValue label="Controller note" value={device.unifiNote} />}
           </dl>
         </div>
       )}
@@ -287,6 +348,29 @@ export function DeviceDetail({ device }: { device: Device }) {
       )}
     </div>
   );
+}
+
+function formatBytes(bytes?: number): string {
+  if (bytes === undefined) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = "B";
+  for (const next of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = next;
+  }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} ${unit}`;
+}
+
+function formatDuration(seconds: number): string {
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days > 0) return `${days} d ${hours} h`;
+  if (hours > 0) return `${hours} h ${minutes} min`;
+  return `${minutes} min`;
 }
 
 function BannerView({ banner }: { banner: HttpBanner | TlsBanner | TextBanner }) {
