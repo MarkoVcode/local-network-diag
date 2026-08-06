@@ -185,7 +185,74 @@ export function SetupPanel({
           and refuses anything wider than a /22.
         </p>
       </Card>
+
+      <DangerZone />
     </div>
+  );
+}
+
+/**
+ * The factory reset. Exists so a true first run can be reproduced: everything
+ * the app has stored — networks, scan histories, controller settings and their
+ * keychain entries, preferences — is deleted, and the app quits. The next
+ * launch starts from nothing, including the network discovery prompt.
+ */
+function DangerZone() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.factoryReset();
+      // The app exits inside the command; nothing to do on success.
+    } catch (err) {
+      setError(String(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Danger zone">
+      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+        Forget all configuration: deletes every network, its scan history, controller settings
+        and stored credentials, then quits the app. The next launch behaves like a first run.
+      </p>
+
+      {confirming ? (
+        <div
+          className="mt-3 rounded-lg border p-3"
+          style={{ borderColor: "var(--status-critical)" }}
+        >
+          <p className="text-sm">
+            Really delete <strong>everything</strong> this app has stored? This cannot be
+            undone, and the app will close immediately.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button variant="danger" onClick={reset} disabled={busy}>
+              {busy ? "Wiping…" : "Forget everything and quit"}
+            </Button>
+            <Button onClick={() => setConfirming(false)} disabled={busy}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3">
+          <Button variant="danger" onClick={() => setConfirming(true)}>
+            Forget all configuration…
+          </Button>
+        </div>
+      )}
+
+      {error && (
+        <p className="mt-2 text-xs" style={{ color: "var(--status-critical)" }}>
+          {error}
+        </p>
+      )}
+    </Card>
   );
 }
 

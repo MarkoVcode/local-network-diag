@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutoRepeatState,
+  DiscoveredNetwork,
   DoctorReport,
   Detection,
   NetworkList,
@@ -186,6 +187,25 @@ export async function deleteNetwork(id: string): Promise<void> {
 /** Deletes a network's scans but keeps the network and its settings. */
 export async function clearNetworkHistory(id: string): Promise<number> {
   return invoke<number>("clear_network_history", { id });
+}
+
+/** Subnets this machine is attached to, for the network picker. */
+export async function discoverLocalNetworks(): Promise<DiscoveredNetwork[]> {
+  return invoke<DiscoveredNetwork[]>("discover_local_networks");
+}
+
+/** Resolves a range to a saved network, creating one when nothing covers it. */
+export async function ensureNetworkForRange(
+  cidr: string,
+  name?: string,
+  select = true,
+): Promise<NetworkProfile> {
+  return invoke<NetworkProfile>("ensure_network_for_range", { cidr, name, select });
+}
+
+/** Wipes all settings and histories, then quits the app. */
+export async function factoryReset(): Promise<void> {
+  return invoke("factory_reset");
 }
 
 /** What "Run scan" would sweep right now. */

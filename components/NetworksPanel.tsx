@@ -16,10 +16,13 @@ export function NetworksPanel({
   networks,
   activeId,
   onChanged,
+  onDiscover,
 }: {
   networks: NetworkProfile[];
   activeId?: string;
   onChanged: () => void;
+  /** Reopens the first-run picker of currently-visible subnets. */
+  onDiscover?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +53,13 @@ export function NetworksPanel({
       <Card
         title="Networks"
         subtitle="Each network keeps its own scan history, diffs and controller settings"
+        actions={
+          onDiscover && (
+            <Button onClick={onDiscover} disabled={busy}>
+              Discover networks…
+            </Button>
+          )
+        }
       >
         <p className="mb-3 text-sm" style={{ color: "var(--text-secondary)" }}>
           Two places often use the same subnet — <code>192.168.0.0/24</code> is not unusual at

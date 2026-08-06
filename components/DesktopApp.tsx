@@ -15,6 +15,7 @@ import { ReconciliationPanel } from "./ReconciliationPanel";
 import { UpdateGate } from "./UpdateDialog";
 import { NetworkPrompt, NetworkSwitcher } from "./NetworkSwitcher";
 import { NetworksPanel } from "./NetworksPanel";
+import { NetworkDiscovery } from "./NetworkDiscovery";
 import { SignalMeter } from "./charts";
 import {
   Button,
@@ -32,6 +33,7 @@ import * as api from "@/lib/api";
 import {
   isNewDevice,
   type Detection,
+  type DiscoveredNetwork,
   type NetworkProfile,
   type AutoRepeatState,
   type DoctorReport,
@@ -52,15 +54,23 @@ type Section =
   | "history"
   | "setup";
 
-const NAV: { id: Section; label: string; icon: string }[] = [
+type NavItem = { id: Section; label: string; icon: string };
+
+/* The nav is split by scope: everything in the network group changes meaning
+ * when the dropdown above it changes; the system group describes this machine
+ * and the app, whichever network is selected. */
+const NETWORK_NAV: NavItem[] = [
   { id: "overview", label: "Overview", icon: "◉" },
   { id: "devices", label: "Devices", icon: "▤" },
   { id: "connectivity", label: "Connectivity", icon: "↭" },
   { id: "wifi", label: "Wi-Fi", icon: "≋" },
   { id: "controller", label: "Controller", icon: "⊞" },
-  { id: "host", label: "Host & interfaces", icon: "⌂" },
-  { id: "networks", label: "Networks", icon: "◈" },
   { id: "history", label: "History", icon: "⟲" },
+];
+
+const SYSTEM_NAV: NavItem[] = [
+  { id: "networks", label: "Networks", icon: "◈" },
+  { id: "host", label: "Host & interfaces", icon: "⌂" },
   { id: "setup", label: "Setup & Status", icon: "⚙" },
 ];
 
@@ -85,6 +95,7 @@ export function DesktopApp() {
   const [activeNetwork, setActiveNetwork] = useState<string>();
   const [detection, setDetection] = useState<Detection | null>(null);
   const [scanTargets, setScanTargets] = useState<ScanTarget[] | null>(null);
+  const [discovery, setDiscovery] = useState<DiscoveredNetwork[] | null>(null);
 
   const mounted = useRef(true);
 
@@ -97,14 +108,28 @@ export function DesktopApp() {
     }
   }, []);
 
-  const refreshNetworks = useCallback(async () => {
+  const refreshNetworks = useCallback(async (): Promise<NetworkProfile[]> => {
     try {
       const list = await api.listNetworks();
-      if (!mounted.current) return;
+      if (!mounted.current) return list.networks;
       setNetworks(list.networks);
       setActiveNetwork(list.active);
+      return list.networks;
     } catch {
       // Not fatal: the app still works against whichever network is selected.
+      return [];
+    }
+  }, []);
+
+  const refreshDoctor = useCallback(async (force: boolean) => {
+    setDoctorLoading(true);
+    try {
+      const report = await api.runDoctor(force);
+      if (mounted.current) setDoctor(report);
+    } catch (err) {
+      if (mounted.current) setError(String(err));
+    } finally {
+      if (mounted.current) setDoctorLoading(false);
     }
   }, []);
 
@@ -119,28 +144,33 @@ export function DesktopApp() {
         await api.switchNetwork(id);
         setSnapshot(null);
         setActiveNetwork(id);
-        await refreshNetworks();
+        const list = await refreshNetworks();
         const status = await api.getStatus();
         if (status.lastSnapshotId) await loadSnapshot(status.lastSnapshotId);
         setRefreshToken((token) => token + 1);
+
+        // The doctor's controller check is per network; a stale report would
+        // describe the previous network's controller.
+        void refreshDoctor(false);
+
+        // Pre-fill the scan range with the selected network's subnet when this
+        // machine is not attached to it — that makes "Run scan" mean "scan the
+        // selected network", not silently "scan wherever I am".
+        try {
+          const profile = list.find((network) => network.id === id);
+          const subnet = profile?.fingerprint.subnets[0];
+          const local = await api.previewScanTargets([]);
+          if (!mounted.current) return;
+          setExtraRange(subnet && !local.some((t) => t.cidr === subnet) ? subnet : "");
+        } catch {
+          // Pre-filling is a convenience; failing to do it changes nothing.
+        }
       } catch (err) {
         setError(String(err));
       }
     },
-    [loadSnapshot, refreshNetworks],
+    [loadSnapshot, refreshNetworks, refreshDoctor],
   );
-
-  const refreshDoctor = useCallback(async (force: boolean) => {
-    setDoctorLoading(true);
-    try {
-      const report = await api.runDoctor(force);
-      if (mounted.current) setDoctor(report);
-    } catch (err) {
-      if (mounted.current) setError(String(err));
-    } finally {
-      if (mounted.current) setDoctorLoading(false);
-    }
-  }, []);
 
   // Initial load: status, capabilities, latest snapshot.
   useEffect(() => {
@@ -173,7 +203,19 @@ export function DesktopApp() {
       setDataDir(dir);
       setAppVersion(version);
 
-      await refreshNetworks();
+      const list = await refreshNetworks();
+
+      if (list.length === 0) {
+        // A true first run (or post-reset): offer the networks this machine
+        // can see instead of the single-network detection prompt.
+        try {
+          const found = await api.discoverLocalNetworks();
+          if (mounted.current) setDiscovery(found);
+        } catch {
+          // Discovery is best-effort; the Networks page can still create one.
+        }
+        return;
+      }
 
       // Ask which network this is only after the rest has loaded, so the prompt
       // does not race the first render.
@@ -256,9 +298,17 @@ export function DesktopApp() {
     setError(null);
     setRunning(true);
     try {
+      const range = extraRange.trim();
+      if (range) {
+        // A range nothing covers yet becomes a network of its own before the
+        // scan starts, so the results have somewhere of their own to live —
+        // and a range an existing network covers selects that network.
+        await api.ensureNetworkForRange(range);
+        await refreshNetworks();
+      }
       const id = await api.startScan({
         portProfile,
-        extraRanges: extraRange.trim() ? [extraRange.trim()] : [],
+        extraRanges: range ? [range] : [],
       });
       await loadSnapshot(id);
       setRefreshToken((token) => token + 1);
@@ -302,11 +352,69 @@ export function DesktopApp() {
 
   const activePhase = phases.find((p) => p.status === "running");
 
+  const renderNavItem = (item: NavItem) => {
+    const active = section === item.id;
+    const findings =
+      (snapshot?.reconciliation?.shadow.length ?? 0) +
+      (snapshot?.reconciliation?.identityConflicts.length ?? 0);
+    const badgeCount =
+      item.id === "setup" ? problemCount : item.id === "controller" ? findings : 0;
+    const badge = badgeCount > 0;
+
+    return (
+      <button
+        key={item.id}
+        type="button"
+        onClick={() => setSection(item.id)}
+        className="mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors"
+        style={{
+          background: active ? "var(--surface-raised)" : "transparent",
+          color: active ? "var(--text-primary)" : "var(--text-secondary)",
+          fontWeight: active ? 600 : 400,
+        }}
+      >
+        <span aria-hidden style={{ color: active ? "var(--series-1)" : "var(--text-muted)" }}>
+          {item.icon}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+        {badge && (
+          <span
+            aria-label={`${badgeCount} item(s) need attention`}
+            className="shrink-0 rounded-full px-1.5 text-[10px] font-semibold tabular"
+            style={{
+              background:
+                item.id === "setup" && doctor?.blocked
+                  ? "var(--status-critical)"
+                  : item.id === "controller"
+                    ? "var(--status-critical)"
+                    : "var(--status-warning)",
+              color: "#000",
+            }}
+          >
+            {badgeCount}
+          </span>
+        )}
+      </button>
+    );
+  };
+
   return (
     <div className="flex h-screen overflow-hidden">
       <UpdateGate />
 
-      {detection && (
+      {discovery && (
+        <NetworkDiscovery
+          candidates={discovery}
+          onDone={async () => {
+            setDiscovery(null);
+            await refreshNetworks();
+            setRefreshToken((token) => token + 1);
+          }}
+          onSkip={() => setDiscovery(null)}
+        />
+      )}
+
+      {detection && !discovery && (
         <NetworkPrompt
           detection={detection}
           onResolved={async () => {
@@ -344,51 +452,21 @@ export function DesktopApp() {
         />
 
         <nav className="flex-1 overflow-y-auto px-2">
-          {NAV.map((item) => {
-            const active = section === item.id;
-            const findings =
-              (snapshot?.reconciliation?.shadow.length ?? 0) +
-              (snapshot?.reconciliation?.identityConflicts.length ?? 0);
-            const badgeCount =
-              item.id === "setup" ? problemCount : item.id === "controller" ? findings : 0;
-            const badge = badgeCount > 0;
+          <p
+            className="mb-1 mt-1 px-2.5 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: "var(--text-muted)" }}
+          >
+            This network
+          </p>
+          {NETWORK_NAV.map(renderNavItem)}
 
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setSection(item.id)}
-                className="mb-0.5 flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors"
-                style={{
-                  background: active ? "var(--surface-raised)" : "transparent",
-                  color: active ? "var(--text-primary)" : "var(--text-secondary)",
-                  fontWeight: active ? 600 : 400,
-                }}
-              >
-                <span aria-hidden style={{ color: active ? "var(--series-1)" : "var(--text-muted)" }}>
-                  {item.icon}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                {badge && (
-                  <span
-                    aria-label={`${badgeCount} item(s) need attention`}
-                    className="shrink-0 rounded-full px-1.5 text-[10px] font-semibold tabular"
-                    style={{
-                      background:
-                        item.id === "setup" && doctor?.blocked
-                          ? "var(--status-critical)"
-                          : item.id === "controller"
-                            ? "var(--status-critical)"
-                            : "var(--status-warning)",
-                      color: "#000",
-                    }}
-                  >
-                    {badgeCount}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+          <p
+            className="mb-1 mt-4 px-2.5 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: "var(--text-muted)" }}
+          >
+            System
+          </p>
+          {SYSTEM_NAV.map(renderNavItem)}
         </nav>
 
         {/* Scan controls dock to the sidebar rather than floating in a header.
@@ -443,22 +521,28 @@ export function DesktopApp() {
           )}
 
           {section === "setup" ? (
-            <div className="space-y-4">
-              <SetupPanel
-                report={doctor}
-                onRecheck={() => refreshDoctor(true)}
-                loading={doctorLoading}
-                dataDir={dataDir}
-                appVersion={appVersion}
-              />
-              <UnifiSettings onChanged={() => refreshDoctor(true)} />
-            </div>
+            /* System scope only — the per-network controller settings live on
+               the Controller page, beside the data they produce. */
+            <SetupPanel
+              report={doctor}
+              onRecheck={() => refreshDoctor(true)}
+              loading={doctorLoading}
+              dataDir={dataDir}
+              appVersion={appVersion}
+            />
           ) : section === "networks" ? (
             /* Handled before the no-snapshot case: managing networks must work
                even when the selected one has never been scanned. */
             <NetworksPanel
               networks={networks}
               activeId={activeNetwork}
+              onDiscover={async () => {
+                try {
+                  setDiscovery(await api.discoverLocalNetworks());
+                } catch (err) {
+                  setError(String(err));
+                }
+              }}
               onChanged={async () => {
                 await refreshNetworks();
                 // Switching or deleting changes which history is current, so
@@ -469,8 +553,21 @@ export function DesktopApp() {
                 setRefreshToken((token) => token + 1);
               }}
             />
-          ) : section === "controller" && !snapshot ? (
-            <ReconciliationPanel />
+          ) : section === "controller" ? (
+            /* Also before the no-snapshot case: the controller can be
+               configured before the first scan. Keyed by network so a switch
+               reloads this network's settings instead of showing the last
+               one's — the controller is per network. */
+            <div className="space-y-4">
+              <ReconciliationPanel
+                reconciliation={snapshot?.reconciliation}
+                unifi={snapshot?.unifi}
+              />
+              <UnifiSettings
+                key={activeNetwork ?? "none"}
+                onChanged={() => refreshDoctor(true)}
+              />
+            </div>
           ) : !snapshot ? (
             <Card>
               <EmptyState
@@ -501,12 +598,6 @@ export function DesktopApp() {
                 <ConnectivityPanel connectivity={snapshot.connectivity} />
               )}
               {section === "wifi" && <WifiPanel wifi={snapshot.wifi} />}
-              {section === "controller" && (
-                <ReconciliationPanel
-                  reconciliation={snapshot.reconciliation}
-                  unifi={snapshot.unifi}
-                />
-              )}
               {section === "host" && <HostPanel snapshot={snapshot} />}
               {section === "history" && (
                 <HistoryPanel
@@ -768,12 +859,13 @@ function ScanOptions({
       </label>
 
       <label className="mt-2 block text-[11px]" style={{ color: "var(--text-secondary)" }}>
-        Extra range
+        Target range
         <input
           type="text"
           value={extraRange}
           onChange={(e) => setExtraRange(e.target.value)}
           placeholder="192.168.1.0/24"
+          title="Filled automatically when the selected network is not the one this machine is on. A range no saved network covers becomes a new network when the scan starts."
           className="mt-1 w-full rounded-lg border px-2 py-1 text-xs"
           style={{
             borderColor: "var(--border-strong)",

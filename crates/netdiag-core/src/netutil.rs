@@ -93,6 +93,15 @@ pub fn parse_cidr_any(input: &str) -> Result<ParsedCidr, String> {
     })
 }
 
+/// True when two CIDR ranges share any address. Unparseable input is simply
+/// "no overlap" — callers use this for matching, not validation.
+pub fn cidrs_overlap(a: &str, b: &str) -> bool {
+    match (parse_cidr_any(a), parse_cidr_any(b)) {
+        (Ok(x), Ok(y)) => x.first <= y.last && y.first <= x.last,
+        _ => false,
+    }
+}
+
 /// Derives the enclosing /24 — turns an off-subnet mDNS/SSDP hint into a scannable range.
 pub fn to_slash24(ip: Ipv4Addr) -> String {
     let value = u32::from(ip) & 0xFFFF_FF00;
@@ -267,6 +276,19 @@ mod tests {
         assert!(parse_cidr("not-a-cidr").is_err());
         assert!(parse_cidr("10.0.0.1").is_err());
         assert!(parse_cidr("10.0.0.1/33").is_err());
+    }
+
+    #[test]
+    fn overlap_is_symmetric_and_tolerant_of_junk() {
+        assert!(cidrs_overlap("10.0.3.0/24", "10.0.3.128/25"));
+        assert!(
+            cidrs_overlap("10.0.0.0/16", "10.0.3.0/24"),
+            "containment counts"
+        );
+        assert!(!cidrs_overlap("10.0.3.0/24", "10.0.4.0/24"));
+        // The host part is masked away before comparing.
+        assert!(cidrs_overlap("10.0.3.99/24", "10.0.3.0/24"));
+        assert!(!cidrs_overlap("garbage", "10.0.3.0/24"));
         assert!(parse_cidr("999.0.0.1/24").is_err());
     }
 
