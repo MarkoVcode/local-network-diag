@@ -163,8 +163,11 @@ async fn arm_next_run(state: &AppState) {
 /// because there the evidence cannot tell sites apart.
 ///
 /// Returns warnings to attach to the snapshot so the decision is visible.
-async fn route_scan_to_network(app: &AppHandle, state: &AppState) -> Vec<String> {
-    let (_host, fingerprint) = networks::probe_current().await;
+async fn route_scan_to_network(
+    app: &AppHandle,
+    state: &AppState,
+    extra_ranges: &[String],
+) -> Vec<String> {
     let root = state.settings_root();
     let mut index = NetworkIndex::load(root).await;
     index.active = state
@@ -173,6 +176,25 @@ async fn route_scan_to_network(app: &AppHandle, state: &AppState) -> Vec<String>
         .await
         .clone()
         .or_else(|| index.active.clone());
+
+    // A scan explicitly aimed at the selected network's own subnet is a
+    // *targeted* scan: the user chose where to look, so the result files
+    // there. Rerouting applies only to default scans, where "wherever the
+    // machine sits" is the only sensible meaning.
+    if let Some(profile) = index.active.as_deref().and_then(|id| index.get(id)) {
+        let targeted = extra_ranges.iter().any(|range| {
+            profile
+                .fingerprint
+                .subnets
+                .iter()
+                .any(|subnet| netutil::cidrs_overlap(subnet, range))
+        });
+        if targeted {
+            return Vec::new();
+        }
+    }
+
+    let (_host, fingerprint) = networks::probe_current().await;
 
     match index.detect(&fingerprint) {
         Detection::Current { .. } | Detection::NoNetwork => Vec::new(),
@@ -255,7 +277,7 @@ async fn execute_scan(
 
     // Must precede `state.store()`: the store is bound to whichever network is
     // active when the scan starts writing.
-    let routing_warnings = route_scan_to_network(&app, &state).await;
+    let routing_warnings = route_scan_to_network(&app, &state, &config.extra_ranges).await;
     for message in &routing_warnings {
         let _ = app.emit(
             PROGRESS_EVENT,
@@ -642,6 +664,264 @@ async fn rename_network(
     index.save(root).await
 }
 
+/// Deletes a network's scan history while keeping the network itself — the
+/// fingerprint, name and controller settings survive.
+///
+/// Exists for starting over: scans recorded before the scan-routing fix could
+/// mix several sites into one history, and there is no untangling them after
+/// the fact — a clean slate is the honest reset.
+#[tauri::command]
+async fn clear_network_history(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<usize, String> {
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+    if index.get(&id).is_none() {
+        return Err("No such network".into());
+    }
+
+    let removed = Store::new(NetworkIndex::scans_dir(root, &id)).clear().await;
+
+    if let Some(profile) = index.get_mut(&id) {
+        profile.scan_count = 0;
+        profile.last_seen_at = None;
+    }
+    index.save(root).await?;
+
+    // The next scan against this network is a fresh baseline, and any
+    // remembered "latest snapshot" no longer exists.
+    if state.active_network.lock().await.as_deref() == Some(id.as_str()) {
+        *state.last_snapshot_id.lock().await = None;
+    }
+
+    Ok(removed)
+}
+
+/// What "Run scan" would sweep right now. Interface enumeration only — cheap
+/// enough for the UI to call as the user types an extra range.
+#[tauri::command]
+fn preview_scan_targets(extra_ranges: Vec<String>) -> Vec<ScanTarget> {
+    scan::hostinfo::preview_targets(&extra_ranges)
+}
+
+/// A local subnet this machine can see right now, offered as a network to track.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveredNetwork {
+    cidr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface: Option<String>,
+    host_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_ip: Option<String>,
+    /// A saved network already covers this range.
+    already_tracked: bool,
+}
+
+/// Lists the subnets this machine is attached to, for the first-run picker
+/// (and its on-demand reopening from the Networks panel).
+#[tauri::command]
+async fn discover_local_networks(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<DiscoveredNetwork>, String> {
+    let targets = scan::hostinfo::preview_targets(&[]);
+    let (_host, fingerprint) = networks::probe_current().await;
+    let index = NetworkIndex::load(state.settings_root()).await;
+
+    let gateway_in = |cidr: &str| -> bool {
+        fingerprint
+            .gateway_ip
+            .as_deref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .zip(netutil::parse_cidr_any(cidr).ok())
+            .map(|(ip, parsed)| parsed.contains(ip))
+            .unwrap_or(false)
+    };
+
+    Ok(targets
+        .into_iter()
+        .map(|target| {
+            let with_gateway = gateway_in(&target.cidr);
+            DiscoveredNetwork {
+                interface: target
+                    .note
+                    .as_deref()
+                    .and_then(|note| note.strip_prefix("local subnet on "))
+                    .map(str::to_string),
+                host_count: target.host_count,
+                // The SSID belongs to whichever subnet the gateway is on; tagging
+                // it onto every interface would mislabel wired segments.
+                ssid: fingerprint.ssid.clone().filter(|_| with_gateway),
+                gateway_ip: fingerprint.gateway_ip.clone().filter(|_| with_gateway),
+                already_tracked: index.networks.iter().any(|profile| {
+                    profile
+                        .fingerprint
+                        .subnets
+                        .iter()
+                        .any(|subnet| netutil::cidrs_overlap(subnet, &target.cidr))
+                }),
+                cidr: target.cidr,
+            }
+        })
+        .collect())
+}
+
+/// Resolves a range to a saved network, creating one when nothing covers it.
+///
+/// This is what lets "scan this address range" and "networks are physical
+/// sites" coexist: a range the user aims at becomes (or resolves to) a
+/// network, and the scan router treats a scan aimed at the selected network's
+/// own subnet as targeted rather than rerouting it to wherever the machine
+/// happens to sit.
+#[tauri::command]
+async fn ensure_network_for_range(
+    state: State<'_, Arc<AppState>>,
+    cidr: String,
+    name: Option<String>,
+    select: Option<bool>,
+) -> Result<NetworkProfile, String> {
+    let normalized = scan::hostinfo::validate_range(&cidr)?;
+    let select = select.unwrap_or(true);
+    let root = state.settings_root();
+    let mut index = NetworkIndex::load(root).await;
+
+    // An existing network covering this range wins over creating a duplicate.
+    if let Some(profile) = index
+        .networks
+        .iter()
+        .find(|profile| {
+            profile
+                .fingerprint
+                .subnets
+                .iter()
+                .any(|subnet| netutil::cidrs_overlap(subnet, &normalized))
+        })
+        .cloned()
+    {
+        if select {
+            index.active = Some(profile.id.clone());
+            index.save(root).await?;
+            *state.active_network.lock().await = Some(profile.id.clone());
+        }
+        return Ok(profile);
+    }
+
+    // Enrich the fingerprint only with facts that belong to this subnet — the
+    // gateway and SSID must not be stamped onto a range they are not on, or
+    // two networks become indistinguishable copies of "here".
+    let local = scan::hostinfo::preview_targets(&[]);
+    let is_local = local
+        .iter()
+        .any(|target| netutil::cidrs_overlap(&target.cidr, &normalized));
+    let current = if is_local {
+        Some(networks::probe_current().await.1)
+    } else {
+        None
+    };
+
+    let gateway_in_range = current
+        .as_ref()
+        .and_then(|c| c.gateway_ip.as_deref())
+        .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+        .zip(netutil::parse_cidr_any(&normalized).ok())
+        .map(|(ip, parsed)| parsed.contains(ip))
+        .unwrap_or(false);
+
+    let fingerprint = networks::NetworkFingerprint {
+        gateway_mac: current
+            .as_ref()
+            .and_then(|c| c.gateway_mac.clone())
+            .filter(|_| gateway_in_range),
+        gateway_ip: current
+            .as_ref()
+            .and_then(|c| c.gateway_ip.clone())
+            .filter(|_| gateway_in_range),
+        subnets: vec![normalized.clone()],
+        ssid: current
+            .as_ref()
+            .and_then(|c| c.ssid.clone())
+            .filter(|_| gateway_in_range),
+        dns_servers: current
+            .as_ref()
+            .map(|c| c.dns_servers.clone())
+            .unwrap_or_default(),
+    };
+
+    let name = name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| {
+            if gateway_in_range {
+                fingerprint.describe()
+            } else {
+                normalized.clone()
+            }
+        });
+
+    let previous_active = index.active.clone();
+    let id = index.add(NetworkProfile::new(name, fingerprint));
+    if !select {
+        index.active = previous_active;
+    }
+
+    tokio::fs::create_dir_all(NetworkIndex::scans_dir(root, &id))
+        .await
+        .map_err(|e| e.to_string())?;
+    index.save(root).await?;
+
+    if select {
+        *state.active_network.lock().await = Some(id.clone());
+    }
+
+    index
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "network vanished during creation".into())
+}
+
+/// Wipes every stored setting and history, then quits.
+///
+/// Exists so a first-run experience can actually be tested: keyring
+/// credentials are cleared first (deleting the settings that identify them
+/// would orphan the entries), then the data directory's contents go, then the
+/// process exits so the next launch starts from nothing.
+#[tauri::command]
+async fn factory_reset(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let root = state.settings_root();
+
+    let index = NetworkIndex::load(root).await;
+    for profile in &index.networks {
+        let dir = NetworkIndex::network_dir(root, &profile.id);
+        if let Some(config) = UnifiConfig::load(&dir).await {
+            let _ = credentials::clear(&config);
+        }
+    }
+    // A pre-networks installation kept controller settings at the root.
+    if let Some(config) = UnifiConfig::load(root).await {
+        let _ = credentials::clear(&config);
+    }
+
+    for entry in [
+        "networks",
+        "unassigned",
+        "scans",
+        "networks.json",
+        "unifi.json",
+        "update-preferences.json",
+    ] {
+        let path = root.join(entry);
+        if tokio::fs::remove_dir_all(&path).await.is_err() {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+
+    app.exit(0);
+    Ok(())
+}
+
 /// Removes a network and everything recorded for it.
 #[tauri::command]
 async fn delete_network(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
@@ -973,6 +1253,30 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Whether this process runs elevated.
+///
+/// The app neither needs nor benefits from elevation — worse, under `sudo` it
+/// resolves a different (root-owned) data directory, so the user's networks
+/// seem to vanish. Setup & Status uses this to say so instead of showing the
+/// "runs without administrator privileges" design note as if it were a
+/// detected fact.
+///
+/// Unix only: a reliable Windows check needs the token APIs, and the message
+/// it would unlock changes nothing there.
+#[tauri::command]
+fn is_running_elevated() -> bool {
+    #[cfg(unix)]
+    {
+        // geteuid is what sudo actually changes; SUDO_USER-style environment
+        // variables are advisory and do not survive every elevation path.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /* ----------------------------------------------------------------------- run */
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1021,6 +1325,7 @@ pub fn run() {
             export_snapshot,
             get_data_dir,
             get_app_version,
+            is_running_elevated,
             check_for_update,
             get_update_preferences,
             skip_update_version,
@@ -1031,6 +1336,11 @@ pub fn run() {
             switch_network,
             refresh_network_fingerprint,
             rename_network,
+            clear_network_history,
+            preview_scan_targets,
+            discover_local_networks,
+            ensure_network_for_range,
+            factory_reset,
             delete_network,
             get_unifi_config,
             save_unifi_config,

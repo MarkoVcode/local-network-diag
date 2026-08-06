@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, StatusBadge, type StatusTone } from "./ui";
 import * as api from "@/lib/api";
 import type { CapabilityReport, CapabilityStatus, DoctorReport, Tier } from "@/lib/types";
@@ -51,6 +51,16 @@ export function SetupPanel({
   appVersion?: string;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [elevated, setElevated] = useState(false);
+
+  useEffect(() => {
+    api
+      .isRunningElevated()
+      .then(setElevated)
+      .catch(() => {
+        // Unknown is treated as not elevated; the design note still applies.
+      });
+  }, []);
 
   if (!report) {
     return (
@@ -180,12 +190,88 @@ export function SetupPanel({
             <dd className="min-w-0 flex-1 break-all font-mono text-xs">{dataDir ?? "—"}</dd>
           </div>
         </dl>
-        <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
-          This app runs without administrator privileges. It scans only private address ranges,
-          and refuses anything wider than a /22.
-        </p>
+        {elevated ? (
+          <p className="mt-3 text-xs" style={{ color: "var(--status-warning)" }}>
+            Running with administrator privileges — this is unnecessary. The app is designed to
+            work unprivileged, elevation adds no capability, and under sudo it uses root&apos;s
+            data directory, so your normal networks and histories will not appear. It still
+            scans only private address ranges and refuses anything wider than a /22.
+          </p>
+        ) : (
+          <p className="mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+            Runs without administrator privileges by design — elevation is never needed. It
+            scans only private address ranges, and refuses anything wider than a /22.
+          </p>
+        )}
       </Card>
+
+      <DangerZone />
     </div>
+  );
+}
+
+/**
+ * The factory reset. Exists so a true first run can be reproduced: everything
+ * the app has stored — networks, scan histories, controller settings and their
+ * keychain entries, preferences — is deleted, and the app quits. The next
+ * launch starts from nothing, including the network discovery prompt.
+ */
+function DangerZone() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.factoryReset();
+      // The app exits inside the command; nothing to do on success.
+    } catch (err) {
+      setError(String(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Danger zone">
+      <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+        Forget all configuration: deletes every network, its scan history, controller settings
+        and stored credentials, then quits the app. The next launch behaves like a first run.
+      </p>
+
+      {confirming ? (
+        <div
+          className="mt-3 rounded-lg border p-3"
+          style={{ borderColor: "var(--status-critical)" }}
+        >
+          <p className="text-sm">
+            Really delete <strong>everything</strong> this app has stored? This cannot be
+            undone, and the app will close immediately.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button variant="danger" onClick={reset} disabled={busy}>
+              {busy ? "Wiping…" : "Forget everything and quit"}
+            </Button>
+            <Button onClick={() => setConfirming(false)} disabled={busy}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3">
+          <Button variant="danger" onClick={() => setConfirming(true)}>
+            Forget all configuration…
+          </Button>
+        </div>
+      )}
+
+      {error && (
+        <p className="mt-2 text-xs" style={{ color: "var(--status-critical)" }}>
+          {error}
+        </p>
+      )}
+    </Card>
   );
 }
 

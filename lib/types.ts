@@ -409,6 +409,17 @@ export interface NetworkFingerprint {
 
 export type MatchStrength = "none" | "weak" | "strong" | "definitive";
 
+/** A local subnet this machine can see right now, offered as a network to track. */
+export interface DiscoveredNetwork {
+  cidr: string;
+  interface?: string;
+  hostCount: number;
+  ssid?: string;
+  gatewayIp?: string;
+  /** A saved network already covers this range. */
+  alreadyTracked: boolean;
+}
+
 export interface NetworkProfile {
   id: string;
   name: string;

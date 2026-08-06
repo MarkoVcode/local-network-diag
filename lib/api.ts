@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AutoRepeatState,
+  DiscoveredNetwork,
   DoctorReport,
   Detection,
   NetworkList,
@@ -23,6 +24,7 @@ import type {
   ScanEvent,
   ScanSnapshot,
   ScanStatus,
+  ScanTarget,
   SnapshotSummary,
 } from "./types";
 
@@ -180,6 +182,40 @@ export async function renameNetwork(id: string, name: string): Promise<void> {
 
 export async function deleteNetwork(id: string): Promise<void> {
   return invoke("delete_network", { id });
+}
+
+/** Deletes a network's scans but keeps the network and its settings. */
+export async function clearNetworkHistory(id: string): Promise<number> {
+  return invoke<number>("clear_network_history", { id });
+}
+
+/** Subnets this machine is attached to, for the network picker. */
+export async function discoverLocalNetworks(): Promise<DiscoveredNetwork[]> {
+  return invoke<DiscoveredNetwork[]>("discover_local_networks");
+}
+
+/** Resolves a range to a saved network, creating one when nothing covers it. */
+export async function ensureNetworkForRange(
+  cidr: string,
+  name?: string,
+  select = true,
+): Promise<NetworkProfile> {
+  return invoke<NetworkProfile>("ensure_network_for_range", { cidr, name, select });
+}
+
+/** Wipes all settings and histories, then quits the app. */
+export async function factoryReset(): Promise<void> {
+  return invoke("factory_reset");
+}
+
+/** True when the process runs elevated (Unix; always false on Windows). */
+export async function isRunningElevated(): Promise<boolean> {
+  return invoke<boolean>("is_running_elevated");
+}
+
+/** What "Run scan" would sweep right now. */
+export async function previewScanTargets(extraRanges: string[]): Promise<ScanTarget[]> {
+  return invoke<ScanTarget[]>("preview_scan_targets", { extraRanges });
 }
 
 /** Re-fingerprints the active network from where the machine is now. */
